@@ -4,6 +4,6 @@ npm install ws
 
 echo.
 echo Starting WebSocket-enabled backend server...
-node node.js
+node server.js
 
 pause
