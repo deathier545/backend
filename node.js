@@ -1,0 +1,420 @@
+const express = require('express');
+const cors = require('cors');
+const rateLimit = require('express-rate-limit');
+const helmet = require('helmet');
+const morgan = require('morgan');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Middleware
+app.use(helmet()); // Security headers
+app.use(cors()); // Enable CORS for all routes
+app.use(express.json()); // Parse JSON bodies
+app.use(morgan('combined')); // Logging
+
+// Rate limiting
+const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100, // Limit each IP to 100 requests per windowMs
+    message: 'Too many requests from this IP, please try again later.'
+});
+app.use('/api/', limiter);
+
+// Data storage (in production, use a real database like MongoDB or PostgreSQL)
+let activeUsers = new Map(); // Store active script users
+let killCommands = new Map(); // Store pending kill commands
+let adminUsers = new Set(); // Store admin user IDs
+
+// Cleanup inactive users every 30 seconds
+setInterval(() => {
+    const now = Date.now();
+    for (const [userId, user] of activeUsers) {
+        if (now - user.timestamp > 30000) { // 30 seconds timeout
+            activeUsers.delete(userId);
+            console.log(`User ${user.username} (${userId}) timed out and removed`);
+        }
+    }
+}, 30000);
+
+// Cleanup expired kill commands every 60 seconds
+setInterval(() => {
+    const now = Date.now();
+    for (const [userId, command] of killCommands) {
+        if (now - command.timestamp > 60000) { // 60 seconds timeout
+            killCommands.delete(userId);
+            console.log(`Kill command for user ${userId} expired and removed`);
+        }
+    }
+}, 60000);
+
+// Helper function to validate user data
+function validateUserData(data) {
+    return data && 
+           typeof data.username === 'string' && 
+           typeof data.userid === 'number' && 
+           typeof data.timestamp === 'number' &&
+           data.username.length > 0 &&
+           data.userid > 0;
+}
+
+// Helper function to validate admin data
+function validateAdminData(data) {
+    return data && 
+           typeof data.target_userid === 'number' && 
+           typeof data.admin_userid === 'number' && 
+           typeof data.timestamp === 'number' &&
+           data.target_userid > 0 &&
+           data.admin_userid > 0;
+}
+
+// Helper function to log admin actions
+function logAdminAction(adminId, action, targetId, details = '') {
+    const timestamp = new Date().toISOString();
+    console.log(`[ADMIN ACTION] ${timestamp} - Admin ${adminId} performed ${action} on target ${targetId} ${details}`);
+}
+
+// Routes
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+    res.json({
+        status: 'Backend is running',
+        timestamp: new Date().toISOString(),
+        activeUsers: activeUsers.size,
+        pendingKillCommands: killCommands.size,
+        uptime: process.uptime()
+    });
+});
+
+// Script user heartbeat endpoint
+app.post('/api/script/heartbeat', (req, res) => {
+    try {
+        const userData = req.body;
+        
+        if (!validateUserData(userData)) {
+            return res.status(400).json({
+                error: 'Invalid user data',
+                required: ['username', 'userid', 'timestamp'],
+                received: userData
+            });
+        }
+        
+        // Store/update user data
+        activeUsers.set(userData.userid, {
+            ...userData,
+            lastSeen: Date.now(),
+            ip: req.ip
+        });
+        
+        console.log(`Heartbeat from ${userData.username} (${userData.userid}) - Game: ${userData.gameid}, Job: ${userData.jobid}`);
+        
+        res.json({
+            success: true,
+            message: 'Heartbeat received',
+            timestamp: Date.now()
+        });
+        
+    } catch (error) {
+        console.error('Heartbeat error:', error);
+        res.status(500).json({
+            error: 'Internal server error',
+            message: error.message
+        });
+    }
+});
+
+// Admin user list endpoint
+app.get('/api/admin/users', (req, res) => {
+    try {
+        // Convert Map to array for JSON response
+        const users = Array.from(activeUsers.values()).map(user => ({
+            username: user.username,
+            userid: user.userid,
+            displayname: user.displayname || user.username,
+            timestamp: user.timestamp,
+            status: user.status || 'active',
+            gameid: user.gameid,
+            jobid: user.jobid,
+            lastSeen: user.lastSeen,
+            ip: user.ip
+        }));
+        
+        res.json({
+            success: true,
+            users: users,
+            total: users.length,
+            timestamp: Date.now()
+        });
+        
+    } catch (error) {
+        console.error('User list error:', error);
+        res.status(500).json({
+            error: 'Internal server error',
+            message: error.message
+        });
+    }
+});
+
+// Admin kill command endpoint
+app.post('/api/admin/kill', (req, res) => {
+    try {
+        const adminData = req.body;
+        
+        if (!validateAdminData(adminData)) {
+            return res.status(400).json({
+                error: 'Invalid admin data',
+                required: ['target_userid', 'admin_userid', 'timestamp'],
+                received: adminData
+            });
+        }
+        
+        // Check if target user exists
+        if (!activeUsers.has(adminData.target_userid)) {
+            return res.status(404).json({
+                error: 'Target user not found',
+                target_userid: adminData.target_userid
+            });
+        }
+        
+        // Store kill command
+        killCommands.set(adminData.target_userid, {
+            target_userid: adminData.target_userid,
+            admin_userid: adminData.admin_userid,
+            admin_username: adminData.admin_username,
+            timestamp: adminData.timestamp,
+            action: 'kill',
+            created: Date.now()
+        });
+        
+        // Log admin action
+        logAdminAction(adminData.admin_userid, 'KILL', adminData.target_userid, 
+                      `(${adminData.admin_username})`);
+        
+        console.log(`Kill command queued for user ${adminData.target_userid} by admin ${adminData.admin_username} (${adminData.admin_userid})`);
+        
+        res.json({
+            success: true,
+            message: 'Kill command sent successfully',
+            target_userid: adminData.target_userid,
+            timestamp: Date.now()
+        });
+        
+    } catch (error) {
+        console.error('Kill command error:', error);
+        res.status(500).json({
+            error: 'Internal server error',
+            message: error.message
+        });
+    }
+});
+
+// User kill command check endpoint
+app.get('/api/script/check_kill/:userid', (req, res) => {
+    try {
+        const userId = parseInt(req.params.userid);
+        
+        if (isNaN(userId) || userId <= 0) {
+            return res.status(400).json({
+                error: 'Invalid user ID',
+                userid: req.params.userid
+            });
+        }
+        
+        // Check if there's a pending kill command
+        const killCommand = killCommands.get(userId);
+        
+        if (killCommand) {
+            // Remove the kill command after sending it
+            killCommands.delete(userId);
+            
+            console.log(`Kill command executed for user ${userId}`);
+            
+            res.json({
+                action: 'kill',
+                timestamp: Date.now(),
+                admin_userid: killCommand.admin_userid,
+                admin_username: killCommand.admin_username
+            });
+        } else {
+            res.json({
+                action: null,
+                timestamp: Date.now()
+            });
+        }
+        
+    } catch (error) {
+        console.error('Kill check error:', error);
+        res.status(500).json({
+            error: 'Internal server error',
+            message: error.message
+        });
+    }
+});
+
+// Admin authentication endpoint (optional - for additional security)
+app.post('/api/admin/auth', (req, res) => {
+    try {
+        const { admin_userid, admin_username, admin_token } = req.body;
+        
+        // Basic validation
+        if (!admin_userid || !admin_username || !admin_token) {
+            return res.status(400).json({
+                error: 'Missing authentication data',
+                required: ['admin_userid', 'admin_username', 'admin_token']
+            });
+        }
+        
+        // In production, implement proper token validation here
+        // For now, we'll just log the authentication attempt
+        console.log(`Admin auth attempt: ${admin_username} (${admin_userid}) with token: ${admin_token}`);
+        
+        // Add to admin users set
+        adminUsers.add(admin_userid);
+        
+        res.json({
+            success: true,
+            message: 'Admin authenticated successfully',
+            admin_userid: admin_userid,
+            timestamp: Date.now()
+        });
+        
+    } catch (error) {
+        console.error('Admin auth error:', error);
+        res.status(500).json({
+            error: 'Internal server error',
+            message: error.message
+        });
+    }
+});
+
+// Admin logout endpoint
+app.post('/api/admin/logout', (req, res) => {
+    try {
+        const { admin_userid } = req.body;
+        
+        if (!admin_userid) {
+            return res.status(400).json({
+                error: 'Missing admin user ID'
+            });
+        }
+        
+        adminUsers.delete(admin_userid);
+        console.log(`Admin ${admin_userid} logged out`);
+        
+        res.json({
+            success: true,
+            message: 'Admin logged out successfully',
+            timestamp: Date.now()
+        });
+        
+    } catch (error) {
+        console.error('Admin logout error:', error);
+        res.status(500).json({
+            error: 'Internal server error',
+            message: error.message
+        });
+    }
+});
+
+// Statistics endpoint
+app.get('/api/stats', (req, res) => {
+    try {
+        const stats = {
+            activeUsers: activeUsers.size,
+            pendingKillCommands: killCommands.size,
+            adminUsers: adminUsers.size,
+            uptime: process.uptime(),
+            memory: process.memoryUsage(),
+            timestamp: Date.now()
+        };
+        
+        res.json({
+            success: true,
+            stats: stats
+        });
+        
+    } catch (error) {
+        console.error('Stats error:', error);
+        res.status(500).json({
+            error: 'Internal server error',
+            message: error.message
+        });
+    }
+});
+
+// Clear all data endpoint (for testing/reset purposes)
+app.post('/api/admin/clear', (req, res) => {
+    try {
+        const { admin_userid, admin_username } = req.body;
+        
+        if (!admin_userid || !admin_username) {
+            return res.status(400).json({
+                error: 'Missing admin credentials'
+            });
+        }
+        
+        // Clear all data
+        activeUsers.clear();
+        killCommands.clear();
+        adminUsers.clear();
+        
+        logAdminAction(admin_userid, 'CLEAR_ALL', 0, `(${admin_username})`);
+        console.log(`All data cleared by admin ${admin_username} (${admin_userid})`);
+        
+        res.json({
+            success: true,
+            message: 'All data cleared successfully',
+            timestamp: Date.now()
+        });
+        
+    } catch (error) {
+        console.error('Clear data error:', error);
+        res.status(500).json({
+            error: 'Internal server error',
+            message: error.message
+        });
+    }
+});
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+    console.error('Unhandled error:', err);
+    res.status(500).json({
+        error: 'Internal server error',
+        message: 'Something went wrong on the server'
+    });
+});
+
+// 404 handler for undefined routes
+app.use('*', (req, res) => {
+    res.status(404).json({
+        error: 'Route not found',
+        method: req.method,
+        path: req.originalUrl,
+        timestamp: Date.now()
+    });
+});
+
+// Start server
+app.listen(PORT, () => {
+    console.log(`🚀 Admin Backend Server running on port ${PORT}`);
+    console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
+    console.log(`📈 Statistics: http://localhost:${PORT}/api/stats`);
+    console.log(`⏰ Server started at: ${new Date().toISOString()}`);
+    console.log(`🔧 Environment: ${process.env.NODE_ENV || 'development'}`);
+});
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+    console.log('\n🛑 Received SIGINT, shutting down gracefully...');
+    process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+    console.log('\n🛑 Received SIGTERM, shutting down gracefully...');
+    process.exit(0);
+});
+
+// Export for testing purposes
+module.exports = app;
