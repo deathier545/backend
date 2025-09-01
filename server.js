@@ -24,7 +24,11 @@ const GATE_TTL_MS    = 10 * 60 * 1000;
 // ===== utils =====
 const b64u = {
   enc: (b) => Buffer.from(b).toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_"),
-  dec: (s) => Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/") + ["", "==", "="][s.length % 4], "base64"),
+  dec: (s) => {
+    const norm = s.replace(/-/g, "+").replace(/_/g, "/");
+    const padLen = (4 - (norm.length % 4)) % 4;
+    return Buffer.from(norm + "=".repeat(padLen), "base64");
+  },
 };
 const hmacHex = (k, d) => crypto.createHmac("sha256", k).update(d).digest("hex");
 const dateStr = (t = Date.now()) => new Date(t).toISOString().slice(0, 10).replace(/-/g, "");
@@ -42,7 +46,9 @@ function verifyToken(tok) {
   if (!tok || !tok.includes(".")) return { ok: false, err: "bad token" };
   const [b, s] = tok.split(".");
   if (s !== hmacHex(SECRET, b)) return { ok: false, err: "bad sig" };
-  const p = JSON.parse(b64u.dec(b).toString("utf8"));
+  let p;
+  try { p = JSON.parse(b64u.dec(b).toString("utf8")); }
+  catch { return { ok:false, err:"bad payload" }; }
   if (!p.uid || !p.exp) return { ok: false, err: "bad payload" };
   if (Date.now() / 1000 > p.exp) return { ok: false, err: "expired" };
   return { ok: true, payload: p };
@@ -133,7 +139,7 @@ body{
 .help{color:var(--muted); font-size:13px}
 .kv{display:flex; align-items:center; gap:10px}
 .code{
-  user-select:all; background:#0e1116; color:#e9eef8;  /* visible text */
+  user-select:all; background:#0e1116; color:#e9eef8;
   border:1px solid var(--stroke); border-radius:12px; padding:12px;
   font-family: ui-monospace, Menlo, Consolas, monospace; font-size:15px; letter-spacing:.3px;
 }
@@ -190,6 +196,7 @@ ${baseHead}
     <div class="row">
       <div class="pill">UserId: <strong>${uid}</strong></div>
       <div class="pill">Window: ${Math.round(GATE_TTL_MS/60000)}m</div>
+      <div class="pill" id="count">Time left: —</div>
     </div>
 
     <div class="hr"></div>
@@ -197,10 +204,28 @@ ${baseHead}
     <p class="help">Step 1: open Linkvertise. Step 2: you will be redirected here to claim the key.</p>
 
     <form action="${LINKVERTISE_URL}" method="GET" class="center">
-      <button class="btn" type="submit">Open Linkvertise</button>
+      <button class="btn" type="submit" rel="noopener">Open Linkvertise</button>
       <button class="btn secondary" type="button" onclick="location.reload()">Refresh</button>
+      <button class="btn secondary" type="button" id="copyLv">Copy Link</button>
     </form>
+    <div class="help" style="margin-top:8px; word-break:break-all">Link: ${LINKVERTISE_URL}</div>
   </main>
+<script>
+(function(){
+  const expiry = ${ts} + (${GATE_TTL_MS});
+  const el = document.getElementById('count');
+  function fmt(ms){
+    const s = Math.max(0, Math.floor(ms/1000));
+    const m = Math.floor(s/60), r = s%60;
+    return m+'m '+r+'s';
+  }
+  function tick(){ el.textContent = 'Time left: ' + fmt(expiry - Date.now()); }
+  tick(); setInterval(tick, 1000);
+  document.getElementById('copyLv').onclick = async ()=>{
+    try{ await navigator.clipboard.writeText('${LINKVERTISE_URL}'); }catch{}
+  };
+})();
+</script>
 </body>`);
 });
 
@@ -259,6 +284,7 @@ ${baseHead}
     <div class="row">
       <div class="pill">UserId: <strong>${uid}</strong></div>
       <div class="pill badge">Verified</div>
+      <div class="pill" id="rotLeft">Rotates in: —</div>
     </div>
 
     <div class="hr"></div>
@@ -266,6 +292,7 @@ ${baseHead}
     <div class="center">
       <button id="btn" class="btn">Receive key</button>
       <button id="copy" class="btn secondary" style="display:none">Copy</button>
+      <button id="save" class="btn secondary" style="display:none">Download .txt</button>
     </div>
 
     <div id="panel" style="margin-top:12px; display:none">
@@ -275,6 +302,17 @@ ${baseHead}
   </main>
 
 <script>
+function rotTick(){
+  const now = new Date();
+  const midnight = new Date(now);
+  midnight.setHours(24,0,0,0);
+  const ms = midnight - now;
+  const s = Math.max(0, Math.floor(ms/1000));
+  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), r = s%60;
+  document.getElementById('rotLeft').textContent = 'Rotates in: ' + h+'h '+m+'m '+r+'s';
+}
+setInterval(rotTick, 1000); rotTick();
+
 async function fetchKey(u){
   const r = await fetch('/get?uid='+u);
   if(!r.ok){ alert('Server error'); return }
@@ -284,11 +322,21 @@ async function fetchKey(u){
   code.textContent = j.key;
   document.getElementById('panel').style.display = 'block';
   document.getElementById('copy').style.display = 'inline-flex';
+  document.getElementById('save').style.display = 'inline-flex';
 }
 document.getElementById('btn').onclick = () => fetchKey(${JSON.stringify(uid)});
 document.getElementById('copy').onclick = async () => {
   const v = document.getElementById('code').textContent;
   try { await navigator.clipboard.writeText(v); } catch {}
+};
+document.getElementById('save').onclick = () => {
+  const v = document.getElementById('code').textContent;
+  if(!v) return;
+  const blob = new Blob([v + '\\n'], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'moonhub-key.txt'; a.click();
+  setTimeout(()=>URL.revokeObjectURL(url), 500);
 };
 </script>
 </body>`);
