@@ -14,7 +14,7 @@ if (!SECRET) throw new Error("SECRET env var missing");
 const LINKVERTISE_URL =
   process.env.LINKVERTISE_URL || "https://link-target.net/1391557/2zhONTJpmRdB";
 
-// Hard-coded anti-bypass token (use env if you prefer)
+// Hard-coded Anti-Bypass token (use env if you prefer)
 const LINKVERTISE_AUTH_TOKEN = "4c70b600c0e85a511ded06aefa338dff4cb85be73a73b3ce7db051d802417e3f";
 
 const GRACE_PREV_DAY = true;
@@ -24,11 +24,7 @@ const GATE_TTL_MS    = 10 * 60 * 1000;
 // ===== utils =====
 const b64u = {
   enc: (b) => Buffer.from(b).toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_"),
-  dec: (s) =>
-    Buffer.from(
-      s.replace(/-/g, "+").replace(/_/g, "/") + ["", "==", "="][s.length % 4],
-      "base64"
-    ),
+  dec: (s) => Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/") + ["", "==", "="][s.length % 4], "base64"),
 };
 const hmacHex = (k, d) => crypto.createHmac("sha256", k).update(d).digest("hex");
 const dateStr = (t = Date.now()) => new Date(t).toISOString().slice(0, 10).replace(/-/g, "");
@@ -52,7 +48,7 @@ function verifyToken(tok) {
   return { ok: true, payload: p };
 }
 
-// Robust verifier (POST form → POST qs → GET; accept "TRUE" or JSON {status:true|valid:true})
+// Robust Linkvertise verifier (POST form → POST qs → GET; accept "TRUE" or JSON)
 async function verifyLinkvertiseHash(hash) {
   if (!LINKVERTISE_AUTH_TOKEN) return { ok: false, detail: "no_token" };
   if (!hash || hash.length < 32) return { ok: false, detail: "no_hash" };
@@ -67,44 +63,84 @@ async function verifyLinkvertiseHash(hash) {
       body: qs,
     });
     let t = (await r.text()).trim();
-    console.log("LV POST form", r.status, t);
     if (r.ok && t.toUpperCase() === "TRUE") return { ok: true };
-    try {
-      const j = JSON.parse(t);
-      if (j === true || j?.valid === true || j?.status === true) return { ok: true };
-    } catch {}
+    try { const j = JSON.parse(t); if (j === true || j?.valid === true || j?.status === true) return { ok: true }; } catch {}
 
     r = await fetch(`${base}?${qs}`, { method: "POST" });
     t = (await r.text()).trim();
-    console.log("LV POST qs  ", r.status, t);
     if (r.ok && t.toUpperCase() === "TRUE") return { ok: true };
-    try {
-      const j = JSON.parse(t);
-      if (j === true || j?.valid === true || j?.status === true) return { ok: true };
-    } catch {}
+    try { const j = JSON.parse(t); if (j === true || j?.valid === true || j?.status === true) return { ok: true }; } catch {}
 
     r = await fetch(`${base}?${qs}`, { method: "GET" });
     t = (await r.text()).trim();
-    console.log("LV GET      ", r.status, t);
     if (r.ok && t.toUpperCase() === "TRUE") return { ok: true };
-    try {
-      const j = JSON.parse(t);
-      if (j === true || j?.valid === true || j?.status === true) return { ok: true };
-    } catch {}
+    try { const j = JSON.parse(t); if (j === true || j?.valid === true || j?.status === true) return { ok: true }; } catch {}
 
     return { ok: false, detail: `status_${r.status}`, body: t };
-  } catch (e) {
-    console.error("LV verify error:", e);
+  } catch {
     return { ok: false, detail: "fetch_error" };
   }
 }
 
-// CORS
-app.use((_, res, next) => {
-  res.set("Access-Control-Allow-Origin", "*");
-  res.set("Access-Control-Allow-Headers", "Content-Type");
-  next();
-});
+// ===== shared UI =====
+const baseHead = `
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>MoonHub Key</title>
+<style>
+:root{
+  --bg:#0b0d10; --fg:#e7e9ee; --muted:#9aa3b2; --card:#11141a; --stroke:#1a1f28;
+  --primary:#4c8bf5; --primary-2:#6ea0ff; --ok:#85f089; --warn:#ffd36a;
+}
+@media (prefers-color-scheme: light){
+  :root{ --bg:#f6f7fb; --fg:#0b0d10; --muted:#50607a; --card:#ffffff; --stroke:#e9edf4; --primary:#2e6cf3; --primary-2:#4a82ff; --ok:#0aa84f; --warn:#b77600; }
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; background: radial-gradient(1200px 600px at 20% -10%, rgba(76,139,245,.12), transparent 60%),
+                      radial-gradient(1200px 800px at 120% 20%, rgba(133,240,137,.10), transparent 55%),
+                      var(--bg);
+  color:var(--fg); font: 16px/1.45 system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji","Segoe UI Emoji";
+  display:grid; place-items:center; padding:24px;
+}
+.card{
+  width:min(720px, 92vw); background:color-mix(in lch, var(--card) 90%, transparent);
+  border:1px solid var(--stroke); border-radius:16px; padding:22px 20px; backdrop-filter: blur(6px);
+  box-shadow: 0 6px 24px rgba(0,0,0,.25);
+}
+.hdr{display:flex; align-items:center; gap:12px; margin-bottom:14px}
+.logo{
+  width:36px;height:36px;border-radius:10px;display:grid;place-items:center;
+  background:linear-gradient(135deg,var(--primary),var(--primary-2)); color:#fff; font-weight:700;
+}
+.h1{font-size:18px; font-weight:650}
+.row{display:flex; align-items:center; gap:10px; flex-wrap:wrap}
+.pill{border:1px solid var(--stroke); background:rgba(255,255,255,.03); padding:6px 10px; border-radius:999px; color:var(--muted); font-size:13px}
+.btn{
+  appearance:none; border:0; background:linear-gradient(180deg,var(--primary),var(--primary-2));
+  color:#fff; padding:11px 16px; border-radius:12px; font-weight:650; cursor:pointer;
+  transition:transform .06s ease, filter .2s ease, box-shadow .2s ease;
+  box-shadow:0 10px 20px rgba(76,139,245,.25);
+}
+.btn:hover{ filter:brightness(1.05) }
+.btn:active{ transform:translateY(1px) }
+.btn.secondary{
+  background:transparent; color:var(--fg); border:1px solid var(--stroke); box-shadow:none;
+}
+.hr{height:1px; background:var(--stroke); margin:16px 0}
+.help{color:var(--muted); font-size:13px}
+.kv{display:flex; align-items:center; gap:10px}
+.code{
+  user-select:all; background:#0a0d12; border:1px solid var(--stroke); border-radius:12px; padding:12px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size:15px;
+}
+.copy{margin-left:auto}
+.badge{color:var(--ok); font-weight:600}
+.warn{color:var(--warn)}
+.center{display:flex; gap:12px; justify-content:flex-start; align-items:center; flex-wrap:wrap}
+</style>
+`;
 
 // ===== core endpoints =====
 app.get("/health", (_req, res) => res.json({ ok: true }));
@@ -118,14 +154,11 @@ app.get("/get", (req, res) => {
 app.post("/verify", (req, res) => {
   const { uid, key } = req.body || {};
   if (!uid || !key) return res.status(400).json({ ok: false, msg: "uid and key required" });
-  const today = dateStr();
-  const yday = dateStr(Date.now() - 86400000);
-  const match =
-    key.toUpperCase() === dailyKey(uid, today) ||
-    (GRACE_PREV_DAY && key.toUpperCase() === dailyKey(uid, yday));
-  if (!match) return res.json({ ok: false, msg: "Invalid key" });
-  const now = Math.floor(Date.now() / 1000);
-  const exp = now + TOKEN_TTL_SEC;
+  const today = dateStr(), yday = dateStr(Date.now() - 86400000);
+  const ok = key.toUpperCase() === dailyKey(uid, today) ||
+             (GRACE_PREV_DAY && key.toUpperCase() === dailyKey(uid, yday));
+  if (!ok) return res.json({ ok: false, msg: "Invalid key" });
+  const now = Math.floor(Date.now() / 1000), exp = now + TOKEN_TTL_SEC;
   res.json({ ok: true, msg: "OK", token: signToken({ uid: String(uid), iat: now, exp, v: 1 }), exp });
 });
 
@@ -136,37 +169,41 @@ app.post("/verifyToken", (req, res) => {
 });
 
 // ===== flow =====
-// 1) Script opens /gate?uid=...
 app.get("/gate", (req, res) => {
   const uid = String(req.query.uid || "");
   if (!/^\d+$/.test(uid)) return res.status(400).send("bad uid");
-  const ts = Date.now();
-  const nonce = crypto.randomBytes(8).toString("hex");
-  const body = `${uid}.${ts}.${nonce}`;
-  const sig = hmacHex(SECRET, body);
+  const ts = Date.now(), nonce = crypto.randomBytes(8).toString("hex");
+  const body = `${uid}.${ts}.${nonce}`, sig = hmacHex(SECRET, body);
   res.cookie("mh_flow", `${body}.${sig}`, { maxAge: GATE_TTL_MS, httpOnly: true, sameSite: "Lax" });
+
   res.type("html").send(`<!doctype html>
-<meta name=viewport content="width=device-width,initial-scale=1">
-<title>MoonHub Key Gate</title>
-<style>
-body{font-family:system-ui;margin:24px;background:#0b0b0d;color:#e6e6e6}
-.card{padding:16px;border:1px solid #222;border-radius:12px;background:#111}
-button{padding:10px 14px;font-size:16px;border:none;border-radius:8px;background:#4c8bf5;color:#fff;cursor:pointer}
-</style>
-<h2>MoonHub Key</h2>
-<div class=card>
-  <p>UserId: <b>${uid}</b></p>
-  <p>Step 1: Open Linkvertise. After completion you will be redirected back automatically.</p>
-  <form action="${LINKVERTISE_URL}" method="GET">
-    <button type="submit">Open Linkvertise</button>
-  </form>
-</div>`);
+${baseHead}
+<body>
+  <main class="card">
+    <div class="hdr">
+      <div class="logo">🌙</div>
+      <div class="h1">MoonHub · Key Gate</div>
+    </div>
+
+    <div class="row">
+      <div class="pill">UserId: <strong>${uid}</strong></div>
+      <div class="pill">Window: ${Math.round(GATE_TTL_MS/60000)}m</div>
+    </div>
+
+    <div class="hr"></div>
+
+    <p class="help">Step 1: open Linkvertise. Step 2: you will be redirected here to claim the key.</p>
+
+    <form action="${LINKVERTISE_URL}" method="GET" class="center">
+      <button class="btn" type="submit">Open Linkvertise</button>
+      <button class="btn secondary" type="button" onclick="location.reload()">Refresh</button>
+    </form>
+  </main>
+</body>`);
 });
 
-// 2) Linkvertise Target-URL -> /lvreturn?hash=...
 app.get("/lvreturn", async (req, res) => {
   const hash = String(req.query.hash || "");
-  console.log("LV return. hash len:", hash.length, "head:", hash.slice(0, 8));
   const raw = String(req.cookies.mh_flow || "");
   const parts = raw.split(".");
   if (parts.length !== 4) return res.status(403).send("forbidden: flow");
@@ -178,22 +215,25 @@ app.get("/lvreturn", async (req, res) => {
 
   const v = await verifyLinkvertiseHash(hash);
   if (!v.ok) {
-    console.warn("LV verify failed:", v);
-    return res
-      .status(403)
-      .type("text/plain")
-      .send(
-        "invalid hash from Linkvertise. Ensure Anti-Bypass is enabled, Target URL = /lvreturn, and do not reload.\nDetails: " +
-          (v.detail || "") +
-          (v.body ? "\nBody: " + v.body : "")
-      );
+    return res.status(403).type("text/html").send(`<!doctype html>
+${baseHead}
+<body>
+  <main class="card">
+    <div class="hdr"><div class="logo">⚠️</div><div class="h1">Verification failed</div></div>
+    <p class="help">Anti-bypass check did not validate this session.</p>
+    <div class="code">Details: ${(v.detail||"")}${v.body?("<br>"+String(v.body).replace(/</g,"&lt;")):""}</div>
+    <div class="hr"></div>
+    <div class="center">
+      <a class="btn" href="/gate?uid=${uid}">Try again</a>
+    </div>
+  </main>
+</body>`);
   }
 
   res.cookie("mh_lv_done", "1", { maxAge: GATE_TTL_MS, httpOnly: true, sameSite: "Lax" });
   res.redirect("/keygate");
 });
 
-// 3) Key page (requires both cookies)
 app.get("/keygate", (req, res) => {
   const raw = String(req.cookies.mh_flow || "");
   const parts = raw.split(".");
@@ -205,33 +245,51 @@ app.get("/keygate", (req, res) => {
   if (!(age >= 0 && age <= GATE_TTL_MS)) return res.status(403).send("expired");
   if (req.cookies.mh_lv_done !== "1") return res.status(403).send("complete Linkvertise first");
 
-  res.type("text/html").send(`<!doctype html>
-<meta name=viewport content="width=device-width,initial-scale=1">
-<title>MoonHub Key</title>
-<style>
-body{font-family:system-ui;margin:24px;background:#0b0b0d;color:#e6e6e6}
-button{padding:10px 14px;font-size:16px;border:none;border-radius:8px;background:#4c8bf5;color:#fff;cursor:pointer}
-pre{margin-top:16px;padding:12px;background:#111;border-radius:8px;color:#8ef58e}
-.card{padding:16px;border:1px solid #222;border-radius:12px;background:#111}
-</style>
-<h2>MoonHub Key</h2>
-<div class=card>
-  <p>UserId: <b>${uid}</b></p>
-  <button id=btn>Receive key</button>
-  <pre id=out style="display:none"></pre>
-</div>
+  res.type("html").send(`<!doctype html>
+${baseHead}
+<body>
+  <main class="card">
+    <div class="hdr">
+      <div class="logo">🔑</div>
+      <div class="h1">MoonHub · Get your key</div>
+    </div>
+
+    <div class="row">
+      <div class="pill">UserId: <strong>${uid}</strong></div>
+      <div class="pill badge">Verified</div>
+    </div>
+
+    <div class="hr"></div>
+
+    <div class="center">
+      <button id="btn" class="btn">Receive key</button>
+      <button id="copy" class="btn secondary" style="display:none">Copy</button>
+    </div>
+
+    <div id="panel" style="margin-top:12px; display:none">
+      <div class="code" id="code"></div>
+      <p class="help" style="margin-top:8px">Key rotates daily. Keep this tab for reference.</p>
+    </div>
+  </main>
+
 <script>
 async function fetchKey(u){
   const r = await fetch('/get?uid='+u);
   if(!r.ok){ alert('Server error'); return }
   const j = await r.json();
   if(!j.ok){ alert(j.msg||'Error'); return }
-  const out = document.getElementById('out');
-  out.textContent = j.key; out.style.display='block';
-  try{ await navigator.clipboard.writeText(j.key) }catch(e){}
+  const code = document.getElementById('code');
+  code.textContent = j.key;
+  document.getElementById('panel').style.display = 'block';
+  document.getElementById('copy').style.display = 'inline-flex';
 }
 document.getElementById('btn').onclick = () => fetchKey(${JSON.stringify(uid)});
-</script>`);
+document.getElementById('copy').onclick = async () => {
+  const v = document.getElementById('code').textContent;
+  try { await navigator.clipboard.writeText(v); } catch {}
+};
+</script>
+</body>`);
 });
 
 // ===== start =====
