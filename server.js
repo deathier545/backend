@@ -4,10 +4,14 @@ import crypto from "crypto";
 const app = express();
 app.use(express.json());
 
-// ----- config -----
-const SECRET = process.env.SECRET || "CHANGE_ME_LONG_RANDOM";
+// ----- required env -----
+const SECRET = process.env.SECRET;
+if (!SECRET) {
+  throw new Error("SECRET env var missing");
+}
+
 const GRACE_PREV_DAY = true;        // accept yesterday's daily key too
-const TOKEN_TTL_SEC   = 24 * 60 * 60;
+const TOKEN_TTL_SEC  = 24 * 60 * 60;
 
 // ----- helpers -----
 const b64u = {
@@ -16,13 +20,10 @@ const b64u = {
 };
 const hmac = (key, data) => crypto.createHmac("sha256", key).update(data).digest();
 const hmacHex = (key, data) => crypto.createHmac("sha256", key).update(data).digest("hex");
-
 const dateStr = (t=Date.now()) => new Date(t).toISOString().slice(0,10).replace(/-/g,""); // YYYYMMDD
 
 function dailyKey(uid, d) {
-  // per-user, per-day deterministic key
   const raw = hmac(SECRET, `${uid}:${d}`);
-  // readable A-Z2-7 slice (not strict base32; good enough for UX)
   return raw.toString("base64").replace(/[^A-Z2-7]/gi,"").slice(0,24).toUpperCase();
 }
 
@@ -44,12 +45,12 @@ function verifyToken(token) {
   return { ok:true, payload };
 }
 
-// ----- CORS (optional, executor HTTP ignores CORS, but web testing benefits) -----
+// ----- CORS (optional for browser testing) -----
 app.use((_,res,next)=>{res.set("Access-Control-Allow-Origin","*");res.set("Access-Control-Allow-Headers","Content-Type");next();});
 
 app.get("/health", (_,res) => res.json({ ok:true }));
 
-// Return today's public daily key for a given uid (UX helper page/button)
+// Return today's key for a uid
 app.get("/get", (req,res) => {
   const uid = `${req.query.uid||""}`.trim();
   if (!uid) return res.status(400).json({ ok:false, msg:"uid required" });
@@ -84,8 +85,6 @@ app.post("/verifyToken", (req,res) => {
   const v = verifyToken(token);
   res.json({ ok: v.ok, msg: v.ok ? "OK" : v.err });
 });
-
-// optional: group-based premium check via your own data store could be added here
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, ()=> console.log("listening", PORT));
