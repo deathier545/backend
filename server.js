@@ -20,7 +20,7 @@ const LINKVERTISE_URL =
 // Token for Linkvertise Anti-Bypass API
 const LINKVERTISE_AUTH_TOKEN = process.env.LINKVERTISE_AUTH_TOKEN || "";
 
-const GRACE_PREV_DAY = true;          // accept yesterday's key
+const GRACE_PREV_DAY = false;          // accept yesterday's key
 const TOKEN_TTL_SEC  = 24 * 60 * 60;  // /verify token TTL
 const GATE_TTL_MS    = 10 * 60 * 1000; // time window to complete LV and claim key
 
