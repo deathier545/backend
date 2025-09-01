@@ -133,7 +133,9 @@ body{
 .help{color:var(--muted); font-size:13px}
 .kv{display:flex; align-items:center; gap:10px}
 .code{
-  user-select:all; background:#0a0d12; border:1px solid var(--stroke); border-radius:12px; padding:12px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size:15px;
+  user-select:all; background:#0e1116; color:#e9eef8;  /* visible text */
+  border:1px solid var(--stroke); border-radius:12px; padding:12px;
+  font-family: ui-monospace, Menlo, Consolas, monospace; font-size:15px; letter-spacing:.3px;
 }
 .copy{margin-left:auto}
 .badge{color:var(--ok); font-weight:600}
