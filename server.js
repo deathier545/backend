@@ -1,4 +1,4 @@
-// server.js
+// server.js — Linkvertise anti-bypass integrated
 import express from "express";
 import crypto from "crypto";
 import cookieParser from "cookie-parser";
@@ -10,10 +10,18 @@ app.use(cookieParser());
 // ===== config =====
 const SECRET = process.env.SECRET;
 if (!SECRET) throw new Error("SECRET env var missing");
+
+// Linkvertise campaign URL users should be sent to from /gate
 const LINKVERTISE_URL = process.env.LINKVERTISE_URL || "https://linkvertise.com/your-slug";
-const GRACE_PREV_DAY  = true;              // accept yesterday's key
-const TOKEN_TTL_SEC   = 24 * 60 * 60;      // token TTL
-const GATE_TTL_MS     = 10 * 60 * 1000;    // /gate and lv-done window
+
+// Linkvertise Anti-Bypass API token (env wins; otherwise uses provided token)
+const LINKVERTISE_AUTH_TOKEN =
+  process.env.LINKVERTISE_AUTH_TOKEN ||
+  "4c70b600c0e85a511ded06aefa338dff4cb85be73a73b3ce7db051d802417e3f";
+
+const GRACE_PREV_DAY = true;           // accept yesterday's key
+const TOKEN_TTL_SEC  = 24 * 60 * 60;   // token TTL for /verify
+const GATE_TTL_MS    = 10 * 60 * 1000; // cookies valid window
 
 // ===== utils =====
 const b64u = {
@@ -40,6 +48,18 @@ function verifyToken(tok) {
   if (!p.uid || !p.exp) return { ok:false, err:"bad payload" };
   if (Date.now()/1000 > p.exp) return { ok:false, err:"expired" };
   return { ok:true, payload:p };
+}
+
+async function verifyLinkvertiseHash(hash) {
+  try {
+    if (!hash || hash.length !== 64) return false;
+    const url = `https://publisher.linkvertise.com/api/v1/anti_bypassing?token=${encodeURIComponent(LINKVERTISE_AUTH_TOKEN)}&hash=${encodeURIComponent(hash)}`;
+    const resp = await fetch(url, { method: "POST" });
+    const txt  = (await resp.text()).trim();
+    return resp.ok && txt === "TRUE";
+  } catch {
+    return false;
+  }
 }
 
 // CORS
@@ -71,7 +91,8 @@ app.post("/verifyToken", (req,res) => {
 });
 
 // ===== hardened Linkvertise flow =====
-// /gate -> issues signed flow cookie and shows a button that links to Linkvertise
+
+// /gate — start here from the script
 app.get("/gate", (req,res) => {
   const uid = String(req.query.uid || "");
   if (!/^\d+$/.test(uid)) return res.status(400).send("bad uid");
@@ -97,24 +118,29 @@ a{color:#8ec6ff}
 </div>`);
 });
 
-// Linkvertise target-URL must point here
-app.get("/lvreturn", (req,res) => {
-  const raw = String(req.cookies.mh_flow || "");
-  const parts = raw.split(".");
+// Linkvertise target-URL MUST point here: /lvreturn?hash=...
+app.get("/lvreturn", async (req,res) => {
+  const hash = req.query.hash;
+  const flowRaw = String(req.cookies.mh_flow || "");
+  const parts = flowRaw.split(".");
   if (parts.length !== 4) return res.status(403).send("forbidden");
   const [uid, ts, nonce, sig] = parts;
   const body = `${uid}.${ts}.${nonce}`;
   if (sig !== hmacHex(SECRET, body)) return res.status(403).send("forbidden");
   const age = Date.now() - Number(ts);
   if (!(age >= 0 && age <= GATE_TTL_MS)) return res.status(403).send("expired");
+
+  const ok = await verifyLinkvertiseHash(String(hash||""));
+  if (!ok) return res.status(403).send("invalid hash");
+
   res.cookie("mh_lv_done", "1", { maxAge: GATE_TTL_MS, httpOnly: true, sameSite: "Lax" });
   res.redirect("/keygate");
 });
 
-// Only reveal key if both flow and lv_done are valid
+// /keygate — only reveal key if both cookies valid
 app.get("/keygate", (req,res) => {
-  const raw = String(req.cookies.mh_flow || "");
-  const parts = raw.split(".");
+  const flowRaw = String(req.cookies.mh_flow || "");
+  const parts = flowRaw.split(".");
   if (parts.length !== 4) return res.status(403).send("forbidden");
   const [uid, ts, nonce, sig] = parts;
   const body = `${uid}.${ts}.${nonce}`;
