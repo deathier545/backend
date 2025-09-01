@@ -9,7 +9,10 @@ app.use(cookieParser());
 const SECRET = process.env.SECRET;
 if (!SECRET) throw new Error("SECRET env var missing");
 
-const LINKVERTISE_URL = process.env.LINKVERTISE_URL || "https://linkvertise.com/your-slug";
+const LINKVERTISE_URL   = process.env.LINKVERTISE_URL || "https://linkvertise.com/your-slug";
+const LINKVERTISE_HOSTS = (process.env.LINKVERTISE_HOSTS || "linkvertise.com,link-target.net")
+  .split(",").map(s => s.trim().toLowerCase());
+
 const GRACE_PREV_DAY = true;
 const TOKEN_TTL_SEC  = 24 * 60 * 60;
 
@@ -19,7 +22,7 @@ const b64u = {
 };
 const hmac = (key, data) => crypto.createHmac("sha256", key).update(data).digest();
 const hmacHex = (key, data) => crypto.createHmac("sha256", key).update(data).digest("hex");
-const dateStr = (t=Date.now()) => new Date(t).toISOString().slice(0,10).replace(/-/g,""); // YYYYMMDD
+const dateStr = (t=Date.now()) => new Date(t).toISOString().slice(0,10).replace(/-/g,"");
 
 function dailyKey(uid, d) {
   const raw = hmac(SECRET, `${uid}:${d}`);
@@ -40,6 +43,14 @@ function verifyToken(token) {
   if (!payload.uid || !payload.exp) return { ok:false, err:"bad payload" };
   if (Date.now()/1000 > payload.exp) return { ok:false, err:"expired" };
   return { ok:true, payload };
+}
+
+function refAllowed(req) {
+  const ref = req.get("referer") || "";
+  try {
+    const host = new URL(ref).hostname.toLowerCase();
+    return LINKVERTISE_HOSTS.some(d => host === d || host.endsWith("." + d));
+  } catch { return false; }
 }
 
 app.use((_,res,next)=>{res.set("Access-Control-Allow-Origin","*");res.set("Access-Control-Allow-Headers","Content-Type");next();});
@@ -79,7 +90,7 @@ app.post("/verifyToken", (req,res) => {
   res.json({ ok: v.ok, msg: v.ok ? "OK" : v.err });
 });
 
-// /go: sets uid cookie then redirects to Linkvertise
+// Step 1: user starts here (from WindUI)
 app.get("/go", (req,res) => {
   const uid = String(req.query.uid || "");
   if (!/^\d+$/.test(uid)) return res.status(400).send("bad uid");
@@ -87,48 +98,37 @@ app.get("/go", (req,res) => {
   res.redirect(LINKVERTISE_URL);
 });
 
-// /keygate: Linkvertise target. Reads uid (cookie or query), then shows a button to reveal today’s key.
+// Step 2: Linkvertise redirects here. Enforce referer + cookie.
 app.get("/keygate", (req,res) => {
-  const uid = String(req.query.uid || req.cookies.moonhub_uid || "");
-  const valid = /^\d+$/.test(uid);
+  if (!refAllowed(req)) return res.status(403).send("forbidden");
+  const uid = String(req.cookies.moonhub_uid || "");
+  if (!/^\d+$/.test(uid)) return res.status(403).send("forbidden");
   res.set("Content-Type","text/html").send(`<!doctype html>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>MoonHub Key</title>
 <style>
 body{font-family:system-ui;margin:24px;background:#0b0b0d;color:#e6e6e6}
-h2{margin:0 0 12px}
 button{padding:10px 14px;font-size:16px;border:none;border-radius:8px;background:#4c8bf5;color:#fff;cursor:pointer}
-button:active{transform:translateY(1px)}
 pre{margin-top:16px;padding:12px;background:#111;border-radius:8px;color:#8ef58e}
-a{color:#8ec6ff}
 .card{padding:16px;border:1px solid #222;border-radius:12px;background:#111}
 </style>
 <h2>MoonHub Key</h2>
 <div class=card>
-  ${valid ? `<p>UserId: <b>${uid}</b></p>` : `<label>UserId: <input id=uid placeholder="e.g. 12345678" style="padding:8px;border-radius:6px;border:1px solid #333;background:#151515;color:#ddd"></label>`}
-  <p>Click to reveal today’s key after completing Linkvertise.</p>
+  <p>UserId: <b>${uid}</b></p>
   <button id=btn>Get Today’s Key</button>
   <pre id=out style="display:none"></pre>
-  <p style="opacity:.8">If nothing shows, reload this page or try again later.</p>
 </div>
 <script>
-const uid = ${valid ? JSON.stringify(uid) : "null"};
 async function fetchKey(u){
   const r = await fetch('/get?uid='+u);
   if(!r.ok){ alert('Server error'); return }
   const j = await r.json();
   if(!j.ok){ alert(j.msg||'Error'); return }
   const out = document.getElementById('out');
-  out.textContent = j.key;
-  out.style.display='block';
+  out.textContent = j.key; out.style.display='block';
   try{ await navigator.clipboard.writeText(j.key) }catch(e){}
 }
-document.getElementById('btn').onclick = () => {
-  if(uid) return fetchKey(uid);
-  const box=document.getElementById('uid');
-  if(!box.value) return alert('Enter userId');
-  fetchKey(String(box.value).replace(/\\D/g,''));
-};
+document.getElementById('btn').onclick = () => fetchKey(${JSON.stringify(uid)});
 </script>`);
 });
 
