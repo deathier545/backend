@@ -1,4 +1,4 @@
-// server.js — MoonHub backend with Linkvertise Anti-Bypass, IP/UA binding, cooldown, rate limits, gated /get, and modern UI (Node >= 20)
+// server.js — MoonHub backend with Linkvertise Anti-Bypass, IP/UA binding, rate limits, gated /get, and modern UI (Node >= 20). Cooldown removed.
 import express from "express";
 import crypto from "crypto";
 import cookieParser from "cookie-parser";
@@ -17,9 +17,8 @@ const LINKVERTISE_URL = process.env.LINKVERTISE_URL || "https://link-target.net/
 // Linkvertise Anti-Bypass publisher token
 const LINKVERTISE_AUTH_TOKEN = (process.env.LINKVERTISE_AUTH_TOKEN || "4c70b600c0e85a511ded06aefa338dff4cb85be73a73b3ce7db051d802417e3f").trim();
 
-// Gate and cooldown windows
+// Gate window and token TTL
 const GATE_TTL_MS     = Number(process.env.GATE_TTL_MS || 10 * 60 * 1000);   // complete flow + claim key within 10m
-const LV_COOLDOWN_MS  = Number(process.env.LV_COOLDOWN_MS || 24 * 60 * 60 * 1000); // how often a browser may complete LV
 const TOKEN_TTL_SEC   = Number(process.env.TOKEN_TTL_SEC || 24 * 60 * 60);   // token TTL from /verify
 const GRACE_PREV_DAY  = String(process.env.GRACE_PREV_DAY || "true") === "true";   // accept yesterday’s key
 const COOKIE_SECURE   = String(process.env.COOKIE_SECURE || "true") !== "false";    // set Secure on cookies by default
@@ -154,12 +153,11 @@ body{ margin:0; background: radial-gradient(1200px 600px at 20% -10%, rgba(76,13
 // ================== core endpoints ==================
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-// /get now requires that the LV gate was completed in this browser (mh_lv_done cookie). It also clears mh_lv_done to be single-use.
+// /get requires LV gate completion in this browser; single-use.
 app.get("/get", (req, res) => {
   if (req.cookies.mh_lv_done !== "1") return res.status(403).json({ ok: false, msg: "gate first" });
   const uid = `${req.query.uid || ""}`.trim();
   if (!/^\d+$/.test(uid)) return res.status(400).json({ ok: false, msg: "uid required" });
-  // single-use consume
   res.clearCookie("mh_lv_done", { sameSite: "Lax", httpOnly: true, secure: COOKIE_SECURE });
   return res.json({ ok: true, key: dailyKey(uid, dateStr()), note: "valid today" });
 });
@@ -181,7 +179,7 @@ app.post("/verifyToken", (req, res) => {
 });
 
 // ================== flow ==================
-// Step 1 — /gate: issue signed flow cookie bound to IP (/24 or IPv6 /64) and user-agent; enforce cooldown & rate limits.
+// Step 1 — /gate: issue signed flow cookie bound to IP (/24 or IPv6 /64) and user-agent; rate limits.
 app.get("/gate", (req, res) => {
   const uid = String(req.query.uid || "");
   if (!/^\d+$/.test(uid)) return res.status(400).send("bad uid");
@@ -191,7 +189,6 @@ app.get("/gate", (req, res) => {
 
   if (!allow("ip:" + ipKey, 30, 10 * 60 * 1000)) return res.status(429).send("slow down");
   if (!allow("uid:" + uid,   10, 10 * 60 * 1000)) return res.status(429).send("slow down");
-  if (req.cookies.mh_lv_cool === "1") return res.status(429).send("Too soon");
 
   const ts = Date.now(), nonce = crypto.randomBytes(8).toString("hex");
   const ipH = shaFrag(ipKey), uaH = shaFrag(uaKey);
@@ -217,7 +214,7 @@ ${baseHead}
 </body>`);
 });
 
-// Step 2 — /lvreturn: verify flow cookie, IP/UA binding, Linkvertise hash; set lv_done and cooldown; redirect to /keygate.
+// Step 2 — /lvreturn: verify flow cookie, IP/UA binding, Linkvertise hash; mark lv_done; redirect to /keygate.
 app.get("/lvreturn", async (req, res) => {
   const raw = String(req.cookies.mh_flow || "");
   const parts = raw.split(".");
@@ -243,7 +240,7 @@ ${baseHead}
 <body>
   <main class="card">
     <div class="hdr"><div class="logo">⚠️</div><div class="h1">Verification failed</div></div>
-    <p class="help">Anti-bypass validation did not pass. Please try again from the start.</p>
+    <p class="help">Anti‑bypass validation did not pass. Please try again from the start.</p>
     <div class="code">Details: ${(v.detail||"")}${v.body?("<br>"+String(v.body).replace(/</g,"&lt;")):""}</div>
     <div class="hr"></div>
     <div class="center"><a class="btn" href="/gate?uid=${uid}">Try again</a></div>
@@ -251,9 +248,8 @@ ${baseHead}
 </body>`);
   }
 
-  // success: mark lv_done and set 24h cooldown cookie
+  // success: mark lv_done (single-use get)
   res.cookie("mh_lv_done", "1",  { maxAge: GATE_TTL_MS, httpOnly: true, sameSite: "Lax", secure: COOKIE_SECURE });
-  res.cookie("mh_lv_cool", "1",  { maxAge: LV_COOLDOWN_MS, httpOnly: true, sameSite: "Lax", secure: COOKIE_SECURE });
   res.redirect("/keygate");
 });
 
@@ -288,7 +284,7 @@ ${baseHead}
     </div>
     <div id="panel" style="margin-top:12px; display:none">
       <div class="code" id="code"></div>
-      <p class="help" style="margin-top:8px">Key rotates daily. Repeat after cooldown.</p>
+      <p class="help" style="margin-top:8px">Key rotates daily.</p>
     </div>
   </main>
 <script>
