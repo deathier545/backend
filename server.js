@@ -1,4 +1,16 @@
-// server.js — Invisible Turnstile + Linkvertise verify + IP/UA bind + rate limits (Node >= 20)
+// server.js — MoonHub backend (Node >= 20)
+// Features:
+// - Per-UID daily key (HMAC)
+// - Linkvertise anti-bypass verify
+// - Invisible Cloudflare Turnstile human check
+// - IP/UA-bound flow cookie
+// - Single-use key retrieval gate
+// Env vars required:
+//   SECRET
+//   LINKVERTISE_URL
+//   LINKVERTISE_AUTH_TOKEN
+//   TURNSTILE_SITEKEY
+//   TURNSTILE_SECRET
 import express from "express";
 import crypto from "crypto";
 import cookieParser from "cookie-parser";
@@ -8,21 +20,24 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 app.use(cookieParser());
 
-// ==== config ====
+// ===== config =====
 const SECRET = process.env.SECRET;
 if (!SECRET) throw new Error("SECRET env var missing");
-const LINKVERTISE_URL =
-  process.env.LINKVERTISE_URL || "https://link-target.net/1391557/2zhONTJpmRdB";
-const LINKVERTISE_AUTH_TOKEN =
-  (process.env.LINKVERTISE_AUTH_TOKEN || "4c70b600c0e85a511ded06aefa338dff4cb85be73a73b3ce7db051d802417e3f").trim();
+
+const LINKVERTISE_URL = process.env.LINKVERTISE_URL || "https://link-target.net/1391557/2zhONTJpmRdB";
+const LINKVERTISE_AUTH_TOKEN = (process.env.LINKVERTISE_AUTH_TOKEN || "").trim();
+if (!LINKVERTISE_AUTH_TOKEN) console.warn("WARN: LINKVERTISE_AUTH_TOKEN not set");
+
 const TURNSTILE_SITEKEY = process.env.TURNSTILE_SITEKEY || "";
 const TURNSTILE_SECRET  = process.env.TURNSTILE_SECRET  || "";
-const GATE_TTL_MS   = Number(process.env.GATE_TTL_MS || 10 * 60 * 1000);
-const TOKEN_TTL_SEC = Number(process.env.TOKEN_TTL_SEC || 24 * 60 * 60);
+if (!TURNSTILE_SITEKEY || !TURNSTILE_SECRET) console.warn("WARN: Turnstile keys not set");
+
+const GATE_TTL_MS   = Number(process.env.GATE_TTL_MS || 10 * 60 * 1000); // 10 min to complete
+const TOKEN_TTL_SEC = Number(process.env.TOKEN_TTL_SEC || 24 * 60 * 60);  // 24h token
 const GRACE_PREV_DAY = String(process.env.GRACE_PREV_DAY || "true") === "true";
 const COOKIE_SECURE  = String(process.env.COOKIE_SECURE || "true") !== "false";
 
-// ==== utils ====
+// ===== utils =====
 const b64u = {
   enc: (b) => Buffer.from(b).toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_"),
   dec: (s) => Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/") + ["", "==", "="][s.length % 4], "base64"),
@@ -37,6 +52,7 @@ function ipCidrKey(ip) {
   if (ip.includes(":")) return ip.split(":").filter(Boolean).slice(0, 4).join(":");
   return ip || "0.0.0.0";
 }
+
 function dailyKey(uid, d) {
   const raw = crypto.createHmac("sha256", SECRET).update(`${uid}:${d}`).digest();
   return raw.toString("base64").replace(/[^A-Z2-7]/gi, "").slice(0, 24).toUpperCase();
@@ -56,21 +72,7 @@ function verifyToken(tok) {
   return { ok: true, payload: p };
 }
 
-// rate limit (in-memory)
-const hits = new Map();
-function allow(key, limit, winMs) {
-  const now = Date.now();
-  const cur = hits.get(key);
-  if (!cur || cur.exp <= now) { hits.set(key, { n: 1, exp: now + winMs }); return true; }
-  if (cur.n >= limit) return false;
-  cur.n++; return true;
-}
-setInterval(() => {
-  const now = Date.now();
-  for (const [k, v] of hits) if (v.exp <= now) hits.delete(k);
-}, 60_000).unref();
-
-// CORS
+// CORS (simple)
 app.use((_, res, next) => {
   res.set("Access-Control-Allow-Origin", "*");
   res.set("Access-Control-Allow-Headers", "Content-Type");
@@ -84,21 +86,26 @@ async function verifyLinkvertiseHash(hash) {
   const base = "https://publisher.linkvertise.com/api/v1/anti_bypassing";
   const qs   = `token=${encodeURIComponent(LINKVERTISE_AUTH_TOKEN)}&hash=${encodeURIComponent(hash)}`;
   try {
+    // POST form
     let r = await fetch(base, { method:"POST", headers:{ "Content-Type":"application/x-www-form-urlencoded" }, body: qs });
     let t = (await r.text()).trim();
     if (r.ok && t.toUpperCase() === "TRUE") return { ok:true };
     try { const j = JSON.parse(t); if (j===true || j?.valid===true || j?.status===true) return { ok:true }; } catch {}
+    // POST with query
     r = await fetch(`${base}?${qs}`, { method:"POST" }); t = (await r.text()).trim();
     if (r.ok && t.toUpperCase() === "TRUE") return { ok:true };
     try { const j = JSON.parse(t); if (j===true || j?.valid===true || j?.status===true) return { ok:true }; } catch {}
+    // GET fallback
     r = await fetch(`${base}?${qs}`, { method:"GET" }); t = (await r.text()).trim();
     if (r.ok && t.toUpperCase() === "TRUE") return { ok:true };
     try { const j = JSON.parse(t); if (j===true || j?.valid===true || j?.status===true) return { ok:true }; } catch {}
     return { ok:false, detail:`status_${r.status}`, body:t };
-  } catch { return { ok:false, detail:"fetch_error" }; }
+  } catch {
+    return { ok:false, detail:"fetch_error" };
+  }
 }
 
-// UI
+// ===== UI =====
 const baseHead = `
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -123,13 +130,14 @@ body{ margin:0; background: radial-gradient(1200px 600px at 20% -10%, rgba(76,13
 .hr{height:1px; background:var(--stroke); margin:16px 0} .help{color:var(--muted); font-size:13px}
 .code{ user-select:all; background:#0e1116; color:#e9eef8; border:1px solid var(--stroke); border-radius:12px; padding:12px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size:15px; letter-spacing:.3px; }
 .center{display:flex; gap:12px; justify-content:flex-start; align-items:center; flex-wrap:wrap}
+.small{font-size:12px; color:var(--muted)}
 </style>
 `;
 
 // ===== endpoints =====
 app.get("/health", (_req,res)=>res.json({ok:true}));
 
-// Single-use + requires both steps
+// /get requires both steps; single-use
 app.get("/get", (req,res) => {
   if (req.cookies.mh_lv_done !== "1" || req.cookies.mh_human !== "1")
     return res.status(403).json({ ok:false, msg:"gate first" });
@@ -156,15 +164,13 @@ app.post("/verifyToken", (req,res)=>{
   res.json({ ok:!!v.ok, msg: v.ok ? "OK" : v.err || "invalid" });
 });
 
-// Step 1 — /gate
+// Step 1 — /gate (start)
 app.get("/gate", (req,res)=>{
   const uid = String(req.query.uid||"");
   if (!/^\d+$/.test(uid)) return res.status(400).send("bad uid");
 
   const ipKey = ipCidrKey(ipOf(req));
   const uaKey = String(req.get("user-agent")||"").slice(0,64);
-  if (!allow("ip:"+ipKey, 30, 10*60*1000)) return res.status(429).send("slow down");
-  if (!allow("uid:"+uid,  10, 10*60*1000)) return res.status(429).send("slow down");
 
   const ts = Date.now(), nonce = crypto.randomBytes(8).toString("hex");
   const ipH = shaFrag(ipKey), uaH = shaFrag(uaKey);
@@ -181,7 +187,7 @@ ${baseHead}
       <div class="pill">Window: ${Math.round(GATE_TTL_MS/60000)}m</div>
     </div>
     <div class="hr"></div>
-    <p class="help">Step 1: open Linkvertise. Step 2: invisible human check. Step 3: claim key.</p>
+    <p class="help">Step 1: open Linkvertise. Step 2: invisible human check. Step 3: claim key. <span class="small">Do not close this tab.</span></p>
     <form action="${LINKVERTISE_URL}" method="GET" class="center">
       <button class="btn" type="submit">Open Linkvertise</button>
       <button class="btn secondary" type="button" onclick="location.reload()">Refresh</button>
@@ -190,7 +196,7 @@ ${baseHead}
 </body>`);
 });
 
-// Step 2 — /lvreturn → render invisible Turnstile
+// Step 2 — /lvreturn → render invisible Turnstile with action + signed cdata
 app.get("/lvreturn", async (req,res)=>{
   const raw = String(req.cookies.mh_flow||"");
   const parts = raw.split(".");
@@ -211,7 +217,7 @@ ${baseHead}
 <body>
   <main class="card">
     <div class="hdr"><div class="logo">⚠️</div><div class="h1">Verification failed</div></div>
-    <p class="help">Anti-bypass check did not pass. Restart.</p>
+    <p class="help">Linkvertise check did not pass. Restart.</p>
     <div class="center"><a class="btn" href="/gate?uid=${uid}">Restart</a></div>
   </main>
 </body>`);
@@ -228,7 +234,12 @@ ${baseHead}
 </body>`);
   }
 
+  // mark LV done
   res.cookie("mh_lv_done", "1", { maxAge:GATE_TTL_MS, httpOnly:true, sameSite:"Lax", secure:COOKIE_SECURE });
+
+  const expectedCData = crypto.createHash("sha256")
+    .update(hmacHex(SECRET, body))
+    .digest("hex").slice(0,16);
 
   res.type("html").send(`<!doctype html>
 ${baseHead}
@@ -236,14 +247,15 @@ ${baseHead}
 <body>
   <main class="card">
     <div class="hdr"><div class="logo">🧩</div><div class="h1">Human check…</div></div>
-    <p class="help">One moment.</p>
-    <div id="container"
+    <p class="help">Just a second.</p>
+    <div id="ts"
          class="cf-turnstile"
          data-sitekey="${TURNSTILE_SITEKEY}"
          data-size="invisible"
+         data-action="mh-human"
+         data-cdata="${expectedCData}"
          data-callback="onTsOK"
-         data-error-callback="onTsErr">
-    </div>
+         data-error-callback="onTsErr"></div>
   </main>
 <script>
 window.onTsOK = async function(token){
@@ -256,7 +268,6 @@ window.onTsOK = async function(token){
 window.onTsErr = function(){ location.replace('/gate?uid=${uid}'); };
 window.onload = function(){
   if (typeof turnstile !== 'undefined') {
-    // auto-rendered; execute invisible widget
     try { turnstile.execute(); } catch(e){ location.replace('/gate?uid=${uid}'); }
   } else {
     setTimeout(()=>location.replace('/gate?uid=${uid}'), 4000);
@@ -266,7 +277,7 @@ window.onload = function(){
 </body>`);
 });
 
-// Step 2.5 — server-side Turnstile verify
+// Step 2.5 — server-side Turnstile verify with strict checks
 app.post("/human", async (req,res)=>{
   const raw = String(req.cookies.mh_flow||"");
   const parts = raw.split(".");
@@ -289,6 +300,14 @@ app.post("/human", async (req,res)=>{
     const r = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", { method:"POST", body: form });
     const j = await r.json();
     if (!j.success) return res.status(403).type("text/plain").send("human check failed");
+    if (j.hostname && j.hostname !== req.hostname) return res.status(403).send("bad host");
+    if (j.action && j.action !== "mh-human") return res.status(403).send("bad action");
+    const tsFresh = Date.now() - Date.parse(j.challenge_ts || 0);
+    if (!(tsFresh >= 0 && tsFresh <= 120000)) return res.status(403).send("stale");
+    const expectedCData = crypto.createHash("sha256")
+      .update(hmacHex(SECRET, body))
+      .digest("hex").slice(0,16);
+    if (j.cdata && j.cdata !== expectedCData) return res.status(403).send("bad cdata");
   } catch {
     return res.status(502).type("text/plain").send("human check error");
   }
@@ -297,7 +316,7 @@ app.post("/human", async (req,res)=>{
   res.status(200).json({ ok:true });
 });
 
-// Step 3 — key page
+// Step 3 — key page (requires both cookies)
 app.get("/keygate", (req,res)=>{
   const raw = String(req.cookies.mh_flow||"");
   const parts = raw.split(".");
