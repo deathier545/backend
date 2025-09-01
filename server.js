@@ -9,50 +9,37 @@ app.use(cookieParser());
 const SECRET = process.env.SECRET;
 if (!SECRET) throw new Error("SECRET env var missing");
 
-const LINKVERTISE_URL   = process.env.LINKVERTISE_URL || "https://linkvertise.com/your-slug";
-const LINKVERTISE_HOSTS = (process.env.LINKVERTISE_HOSTS || "linkvertise.com,link-target.net")
-  .split(",").map(s => s.trim().toLowerCase());
-
-const GRACE_PREV_DAY = true;
-const TOKEN_TTL_SEC  = 24 * 60 * 60;
+const LINKVERTISE_URL = process.env.LINKVERTISE_URL || "https://linkvertise.com/your-slug";
+const GRACE_PREV_DAY  = true;
+const TOKEN_TTL_SEC   = 24 * 60 * 60;
 
 const b64u = {
   enc: b => Buffer.from(b).toString("base64").replace(/=/g,"").replace(/\+/g,"-").replace(/\//g,"_"),
   dec: s => Buffer.from(s.replace(/-/g,"+").replace(/_/g,"/")+["","==","="][s.length%4], "base64")
 };
-const hmac = (key, data) => crypto.createHmac("sha256", key).update(data).digest();
 const hmacHex = (key, data) => crypto.createHmac("sha256", key).update(data).digest("hex");
 const dateStr = (t=Date.now()) => new Date(t).toISOString().slice(0,10).replace(/-/g,"");
 
 function dailyKey(uid, d) {
-  const raw = hmac(SECRET, `${uid}:${d}`);
+  const raw = crypto.createHmac("sha256", SECRET).update(`${uid}:${d}`).digest();
   return raw.toString("base64").replace(/[^A-Z2-7]/gi,"").slice(0,24).toUpperCase();
 }
 function signToken(payloadObj) {
-  const payload = JSON.stringify(payloadObj);
-  const body = b64u.enc(payload);
+  const body = b64u.enc(JSON.stringify(payloadObj));
   const sig  = hmacHex(SECRET, body);
   return `${body}.${sig}`;
 }
 function verifyToken(token) {
-  if (typeof token !== "string" || !token.includes(".")) return { ok:false, err:"bad token" };
+  if (!token || !token.includes(".")) return { ok:false, err:"bad token" };
   const [body, sig] = token.split(".");
-  const good = hmacHex(SECRET, body);
-  if (sig !== good) return { ok:false, err:"bad sig" };
+  if (sig !== hmacHex(SECRET, body)) return { ok:false, err:"bad sig" };
   const payload = JSON.parse(b64u.dec(body).toString("utf8"));
   if (!payload.uid || !payload.exp) return { ok:false, err:"bad payload" };
   if (Date.now()/1000 > payload.exp) return { ok:false, err:"expired" };
   return { ok:true, payload };
 }
 
-function refAllowed(req) {
-  const ref = req.get("referer") || "";
-  try {
-    const host = new URL(ref).hostname.toLowerCase();
-    return LINKVERTISE_HOSTS.some(d => host === d || host.endsWith("." + d));
-  } catch { return false; }
-}
-
+// CORS
 app.use((_,res,next)=>{res.set("Access-Control-Allow-Origin","*");res.set("Access-Control-Allow-Headers","Content-Type");next();});
 
 app.get("/health", (_,res) => res.json({ ok:true }));
@@ -60,49 +47,61 @@ app.get("/health", (_,res) => res.json({ ok:true }));
 app.get("/get", (req,res) => {
   const uid = `${req.query.uid||""}`.trim();
   if (!uid) return res.status(400).json({ ok:false, msg:"uid required" });
-  const today = dateStr();
-  res.json({ ok:true, key: dailyKey(uid, today), note:"valid today" });
+  res.json({ ok:true, key: dailyKey(uid, dateStr()), note:"valid today" });
 });
 
 app.post("/verify", (req,res) => {
   const { uid, key } = req.body || {};
   if (!uid || !key) return res.status(400).json({ ok:false, msg:"uid and key required" });
-
-  const today = dateStr();
-  const yday  = dateStr(Date.now()-86400000);
-
-  const match =
-    key.toUpperCase() === dailyKey(uid, today) ||
-    (GRACE_PREV_DAY && key.toUpperCase() === dailyKey(uid, yday));
-
+  const today = dateStr(), yday = dateStr(Date.now()-86400000);
+  const match = key.toUpperCase()===dailyKey(uid,today) || (GRACE_PREV_DAY && key.toUpperCase()===dailyKey(uid,yday));
   if (!match) return res.json({ ok:false, msg:"Invalid key" });
-
-  const now = Math.floor(Date.now()/1000);
-  const exp = now + TOKEN_TTL_SEC;
-  const token = signToken({ uid: String(uid), iat: now, exp, v: 1 });
-
-  res.json({ ok:true, msg:"OK", token, exp });
+  const now = Math.floor(Date.now()/1000), exp = now + TOKEN_TTL_SEC;
+  return res.json({ ok:true, msg:"OK", token: signToken({ uid:String(uid), iat:now, exp, v:1 }), exp });
 });
 
 app.post("/verifyToken", (req,res) => {
   const { token } = req.body || {};
   const v = verifyToken(token);
-  res.json({ ok: v.ok, msg: v.ok ? "OK" : v.err });
+  res.json({ ok:v.ok, msg: v.ok ? "OK" : v.err });
 });
 
-// Step 1: user starts here (from WindUI)
+// ----- Linkvertise flow secured by signed cookie -----
+
+function issueFlowCookie(res, uid) {
+  const ts = Date.now(); // ms
+  const nonce = crypto.randomBytes(8).toString("hex");
+  const body = `${uid}.${ts}.${nonce}`;
+  const sig  = hmacHex(SECRET, body);
+  // httpOnly=false so client JS can’t read it, but we only need server; keep it simple
+  res.cookie("mh_flow", `${body}.${sig}`, { maxAge: 10*60*1000, httpOnly: true, sameSite: "Lax" });
+}
+function checkFlowCookie(req) {
+  const v = String(req.cookies.mh_flow || "");
+  const parts = v.split(".");
+  if (parts.length !== 4) return { ok:false };
+  const [uid, ts, nonce, sig] = parts;
+  const body = `${uid}.${ts}.${nonce}`;
+  if (hmacHex(SECRET, body) !== sig) return { ok:false };
+  if (!/^\d+$/.test(uid)) return { ok:false };
+  const age = Date.now() - Number(ts);
+  if (!(age >= 0 && age <= 10*60*1000)) return { ok:false };
+  return { ok:true, uid };
+}
+
+// Step 1: from WindUI
 app.get("/go", (req,res) => {
   const uid = String(req.query.uid || "");
   if (!/^\d+$/.test(uid)) return res.status(400).send("bad uid");
-  res.cookie("moonhub_uid", uid, { maxAge: 10 * 60 * 1000, httpOnly: false, sameSite: "Lax" });
+  issueFlowCookie(res, uid);
   res.redirect(LINKVERTISE_URL);
 });
 
-// Step 2: Linkvertise redirects here. Enforce referer + cookie.
+// Step 2: Linkvertise target
 app.get("/keygate", (req,res) => {
-  if (!refAllowed(req)) return res.status(403).send("forbidden");
-  const uid = String(req.cookies.moonhub_uid || "");
-  if (!/^\d+$/.test(uid)) return res.status(403).send("forbidden");
+  const flow = checkFlowCookie(req);
+  if (!flow.ok) return res.status(403).send("forbidden");
+  const uid = flow.uid;
   res.set("Content-Type","text/html").send(`<!doctype html>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>MoonHub Key</title>
@@ -128,7 +127,7 @@ async function fetchKey(u){
   out.textContent = j.key; out.style.display='block';
   try{ await navigator.clipboard.writeText(j.key) }catch(e){}
 }
-document.getElementById('btn').onclick = () => fetchKey(${JSON.stringify(uid)});
+document.getElementById('btn').onclick = ()=>fetchKey(${JSON.stringify(uid)});
 </script>`);
 });
 
