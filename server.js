@@ -1,16 +1,7 @@
 // server.js — MoonHub backend (Node >= 20)
-// Features:
-// - Per-UID daily key (HMAC)
-// - Linkvertise anti-bypass verify
-// - Invisible Cloudflare Turnstile human check
-// - IP/UA-bound flow cookie
-// - Single-use key retrieval gate
-// Env vars required:
-//   SECRET
-//   LINKVERTISE_URL
-//   LINKVERTISE_AUTH_TOKEN
-//   TURNSTILE_SITEKEY
-//   TURNSTILE_SECRET
+// Features: per-UID daily key, Linkvertise verify, invisible Turnstile human check,
+// IP/UA-bound flow cookie, single-use key retrieval.
+// Env vars required: SECRET, LINKVERTISE_URL, TURNSTILE_SITEKEY, TURNSTILE_SECRET
 import express from "express";
 import crypto from "crypto";
 import cookieParser from "cookie-parser";
@@ -25,15 +16,14 @@ const SECRET = process.env.SECRET;
 if (!SECRET) throw new Error("SECRET env var missing");
 
 const LINKVERTISE_URL = process.env.LINKVERTISE_URL || "https://link-target.net/1391557/2zhONTJpmRdB";
-const LINKVERTISE_AUTH_TOKEN = (process.env.LINKVERTISE_AUTH_TOKEN || "").trim();
-if (!LINKVERTISE_AUTH_TOKEN) console.warn("WARN: LINKVERTISE_AUTH_TOKEN not set");
+// Hardcoded to avoid Render splitting it
+const LINKVERTISE_AUTH_TOKEN = "4c70b600c0e85a511ded06aefa338dff4cb85be73a73b3ce7db051d802417e3f";
 
 const TURNSTILE_SITEKEY = process.env.TURNSTILE_SITEKEY || "";
 const TURNSTILE_SECRET  = process.env.TURNSTILE_SECRET  || "";
-if (!TURNSTILE_SITEKEY || !TURNSTILE_SECRET) console.warn("WARN: Turnstile keys not set");
 
-const GATE_TTL_MS   = Number(process.env.GATE_TTL_MS || 10 * 60 * 1000); // 10 min to complete
-const TOKEN_TTL_SEC = Number(process.env.TOKEN_TTL_SEC || 24 * 60 * 60);  // 24h token
+const GATE_TTL_MS   = Number(process.env.GATE_TTL_MS || 10 * 60 * 1000);
+const TOKEN_TTL_SEC = Number(process.env.TOKEN_TTL_SEC || 24 * 60 * 60);
 const GRACE_PREV_DAY = String(process.env.GRACE_PREV_DAY || "true") === "true";
 const COOKIE_SECURE  = String(process.env.COOKIE_SECURE || "true") !== "false";
 
@@ -72,7 +62,7 @@ function verifyToken(tok) {
   return { ok: true, payload: p };
 }
 
-// CORS (simple)
+// CORS
 app.use((_, res, next) => {
   res.set("Access-Control-Allow-Origin", "*");
   res.set("Access-Control-Allow-Headers", "Content-Type");
@@ -86,16 +76,13 @@ async function verifyLinkvertiseHash(hash) {
   const base = "https://publisher.linkvertise.com/api/v1/anti_bypassing";
   const qs   = `token=${encodeURIComponent(LINKVERTISE_AUTH_TOKEN)}&hash=${encodeURIComponent(hash)}`;
   try {
-    // POST form
     let r = await fetch(base, { method:"POST", headers:{ "Content-Type":"application/x-www-form-urlencoded" }, body: qs });
     let t = (await r.text()).trim();
     if (r.ok && t.toUpperCase() === "TRUE") return { ok:true };
     try { const j = JSON.parse(t); if (j===true || j?.valid===true || j?.status===true) return { ok:true }; } catch {}
-    // POST with query
     r = await fetch(`${base}?${qs}`, { method:"POST" }); t = (await r.text()).trim();
     if (r.ok && t.toUpperCase() === "TRUE") return { ok:true };
     try { const j = JSON.parse(t); if (j===true || j?.valid===true || j?.status===true) return { ok:true }; } catch {}
-    // GET fallback
     r = await fetch(`${base}?${qs}`, { method:"GET" }); t = (await r.text()).trim();
     if (r.ok && t.toUpperCase() === "TRUE") return { ok:true };
     try { const j = JSON.parse(t); if (j===true || j?.valid===true || j?.status===true) return { ok:true }; } catch {}
@@ -105,7 +92,7 @@ async function verifyLinkvertiseHash(hash) {
   }
 }
 
-// ===== UI =====
+// UI
 const baseHead = `
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -164,7 +151,7 @@ app.post("/verifyToken", (req,res)=>{
   res.json({ ok:!!v.ok, msg: v.ok ? "OK" : v.err || "invalid" });
 });
 
-// Step 1 — /gate (start)
+// Step 1 — /gate
 app.get("/gate", (req,res)=>{
   const uid = String(req.query.uid||"");
   if (!/^\d+$/.test(uid)) return res.status(400).send("bad uid");
@@ -196,7 +183,7 @@ ${baseHead}
 </body>`);
 });
 
-// Step 2 — /lvreturn → render invisible Turnstile with action + signed cdata
+// Step 2 — /lvreturn → invisible Turnstile with action + signed cdata
 app.get("/lvreturn", async (req,res)=>{
   const raw = String(req.cookies.mh_flow||"");
   const parts = raw.split(".");
@@ -234,7 +221,6 @@ ${baseHead}
 </body>`);
   }
 
-  // mark LV done
   res.cookie("mh_lv_done", "1", { maxAge:GATE_TTL_MS, httpOnly:true, sameSite:"Lax", secure:COOKIE_SECURE });
 
   const expectedCData = crypto.createHash("sha256")
@@ -316,7 +302,7 @@ app.post("/human", async (req,res)=>{
   res.status(200).json({ ok:true });
 });
 
-// Step 3 — key page (requires both cookies)
+// Step 3 — key page
 app.get("/keygate", (req,res)=>{
   const raw = String(req.cookies.mh_flow||"");
   const parts = raw.split(".");
