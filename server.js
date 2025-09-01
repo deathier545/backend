@@ -1,29 +1,29 @@
-// server.js — Linkvertise anti-bypass integrated
+// server.js — Linkvertise anti-bypass + key backend (Node/Express)
 import express from "express";
 import crypto from "crypto";
 import cookieParser from "cookie-parser";
+import fetch from "node-fetch"; // ensure available on any Node version
 
 const app = express();
 app.use(express.json());
 app.use(cookieParser());
 
-// ===== config =====
-const SECRET = process.env.SECRET;
+// ---------- config ----------
+const SECRET = process.env.SECRET;                         // required
 if (!SECRET) throw new Error("SECRET env var missing");
 
-// Linkvertise campaign URL users should be sent to from /gate
-const LINKVERTISE_URL = process.env.LINKVERTISE_URL || "https://linkvertise.com/your-slug";
+const LINKVERTISE_URL =
+  process.env.LINKVERTISE_URL || "https://linkvertise.com/your-slug";
 
-// Linkvertise Anti-Bypass API token (env wins; otherwise uses provided token)
 const LINKVERTISE_AUTH_TOKEN =
   process.env.LINKVERTISE_AUTH_TOKEN ||
-  "4c70b600c0e85a511ded06aefa338dff4cb85be73a73b3ce7db051d802417e3f";
+  "4c70b600c0e85a511ded06aefa338dff4cb85be73a73b3ce7db051d802417e3f"; // replace via env in prod
 
-const GRACE_PREV_DAY = true;           // accept yesterday's key
-const TOKEN_TTL_SEC  = 24 * 60 * 60;   // token TTL for /verify
-const GATE_TTL_MS    = 10 * 60 * 1000; // cookies valid window
+const GRACE_PREV_DAY = true;        // accept yesterday's key
+const TOKEN_TTL_SEC  = 24 * 60 * 60;
+const GATE_TTL_MS    = 10 * 60 * 1000; // window to complete LV and claim key
 
-// ===== utils =====
+// ---------- utils ----------
 const b64u = {
   enc: b => Buffer.from(b).toString("base64").replace(/=/g,"").replace(/\+/g,"-").replace(/\//g,"_"),
   dec: s => Buffer.from(s.replace(/-/g,"+").replace(/_/g,"/")+["","==","="][s.length%4], "base64")
@@ -49,10 +49,9 @@ function verifyToken(tok) {
   if (Date.now()/1000 > p.exp) return { ok:false, err:"expired" };
   return { ok:true, payload:p };
 }
-
 async function verifyLinkvertiseHash(hash) {
   try {
-    if (!hash || hash.length !== 64) return false;
+    if (!hash || hash.length !== 64) return false; // per docs, 64 chars, ~10s TTL
     const url = `https://publisher.linkvertise.com/api/v1/anti_bypassing?token=${encodeURIComponent(LINKVERTISE_AUTH_TOKEN)}&hash=${encodeURIComponent(hash)}`;
     const resp = await fetch(url, { method: "POST" });
     const txt  = (await resp.text()).trim();
@@ -62,10 +61,10 @@ async function verifyLinkvertiseHash(hash) {
   }
 }
 
-// CORS
+// simple CORS
 app.use((_,res,next)=>{res.set("Access-Control-Allow-Origin","*");res.set("Access-Control-Allow-Headers","Content-Type");next();});
 
-// ===== core endpoints =====
+// ---------- core endpoints ----------
 app.get("/health", (_req,res) => res.json({ ok:true }));
 
 app.get("/get", (req,res) => {
@@ -90,9 +89,9 @@ app.post("/verifyToken", (req,res) => {
   res.json({ ok: !!v.ok, msg: v.ok ? "OK" : v.err || "invalid" });
 });
 
-// ===== hardened Linkvertise flow =====
+// ---------- hardened Linkvertise flow ----------
 
-// /gate — start here from the script
+// Step 1: script opens this. Sets signed flow cookie. Shows button to LV.
 app.get("/gate", (req,res) => {
   const uid = String(req.query.uid || "");
   if (!/^\d+$/.test(uid)) return res.status(400).send("bad uid");
@@ -111,18 +110,18 @@ a{color:#8ec6ff}
 <h2>MoonHub Key</h2>
 <div class=card>
   <p>UserId: <b>${uid}</b></p>
-  <p>Step 1: Open Linkvertise. Step 2: You will be redirected back automatically.</p>
+  <p>Step 1: Open Linkvertise. After completion you will be redirected back automatically.</p>
   <form action="${LINKVERTISE_URL}" method="GET">
     <button type="submit">Open Linkvertise</button>
   </form>
 </div>`);
 });
 
-// Linkvertise target-URL MUST point here: /lvreturn?hash=...
+// Step 2: LV target — includes ?hash=...; verify via API; then continue.
 app.get("/lvreturn", async (req,res) => {
-  const hash = req.query.hash;
-  const flowRaw = String(req.cookies.mh_flow || "");
-  const parts = flowRaw.split(".");
+  const hash = String(req.query.hash || "");
+  const raw  = String(req.cookies.mh_flow || "");
+  const parts = raw.split(".");
   if (parts.length !== 4) return res.status(403).send("forbidden");
   const [uid, ts, nonce, sig] = parts;
   const body = `${uid}.${ts}.${nonce}`;
@@ -130,17 +129,17 @@ app.get("/lvreturn", async (req,res) => {
   const age = Date.now() - Number(ts);
   if (!(age >= 0 && age <= GATE_TTL_MS)) return res.status(403).send("expired");
 
-  const ok = await verifyLinkvertiseHash(String(hash||""));
+  const ok = await verifyLinkvertiseHash(hash);
   if (!ok) return res.status(403).send("invalid hash");
 
   res.cookie("mh_lv_done", "1", { maxAge: GATE_TTL_MS, httpOnly: true, sameSite: "Lax" });
   res.redirect("/keygate");
 });
 
-// /keygate — only reveal key if both cookies valid
+// Step 3: key page — requires both cookies valid.
 app.get("/keygate", (req,res) => {
-  const flowRaw = String(req.cookies.mh_flow || "");
-  const parts = flowRaw.split(".");
+  const raw = String(req.cookies.mh_flow || "");
+  const parts = raw.split(".");
   if (parts.length !== 4) return res.status(403).send("forbidden");
   const [uid, ts, nonce, sig] = parts;
   const body = `${uid}.${ts}.${nonce}`;
@@ -178,6 +177,6 @@ document.getElementById('btn').onclick = () => fetchKey(${JSON.stringify(uid)});
 </script>`);
 });
 
-// ===== start =====
+// ---------- start ----------
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, ()=> console.log("listening", PORT));
+app.listen(PORT, () => console.log("listening", PORT));
