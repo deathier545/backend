@@ -1,11 +1,24 @@
-// server.js — MoonHub key backend + Linkvertise Anti-Bypass (Node >= 20)
+// server.js — MoonHub backend (Node >= 20)
+// - Key system + Linkvertise anti-bypass
+// - Admin presence + fast announce/notify/disconnect (poll-based)
+// - Minimal CORS for Roblox HttpService/executors
+
 import express from "express";
 import crypto from "crypto";
 import cookieParser from "cookie-parser";
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "256kb" }));
 app.use(cookieParser());
+
+// ===== CORS (allow script HTTP calls) =====
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-UID, X-SIG");
+  if (req.method === "OPTIONS") return res.status(204).end();
+  next();
+});
 
 // ===== config =====
 const SECRET = process.env.SECRET;
@@ -15,15 +28,31 @@ const LINKVERTISE_URL =
   process.env.LINKVERTISE_URL || "https://link-target.net/1391557/2zhONTJpmRdB";
 
 // Hard-coded Anti-Bypass token (use env if you prefer)
-const LINKVERTISE_AUTH_TOKEN = "4c70b600c0e85a511ded06aefa338dff4cb85be73a73b3ce7db051d802417e3f";
+const LINKVERTISE_AUTH_TOKEN =
+  process.env.LINKVERTISE_AUTH_TOKEN ||
+  "4c70b600c0e85a511ded06aefa338dff4cb85be73a73b3ce7db051d802417e3f";
 
 const GRACE_PREV_DAY = true;
-const TOKEN_TTL_SEC  = 24 * 60 * 60;
-const GATE_TTL_MS    = 10 * 60 * 1000;
+const TOKEN_TTL_SEC = 24 * 60 * 60;
+const GATE_TTL_MS = 10 * 60 * 1000;
+
+// Admin gating defaults (mirror client)
+const GROUP_ID = Number(process.env.GROUP_ID || 497686443);
+const ADMIN_MIN_RANK = Number(process.env.ADMIN_MIN_RANK || 200);
+const ADMIN_ROLE_NAMES = (process.env.ADMIN_ROLE_NAMES || "Developer,Owner")
+  .split(",")
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
 
 // ===== utils =====
 const b64u = {
-  enc: (b) => Buffer.from(b).toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_"),
+  enc: (b) =>
+    Buffer.from(b)
+      .toString("base64")
+      .replace(/=/g, "")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_"),
+  // robust base64url decode
   dec: (s) => {
     const norm = s.replace(/-/g, "+").replace(/_/g, "/");
     const padLen = (4 - (norm.length % 4)) % 4;
@@ -31,11 +60,16 @@ const b64u = {
   },
 };
 const hmacHex = (k, d) => crypto.createHmac("sha256", k).update(d).digest("hex");
-const dateStr = (t = Date.now()) => new Date(t).toISOString().slice(0, 10).replace(/-/g, "");
+const dateStr = (t = Date.now()) =>
+  new Date(t).toISOString().slice(0, 10).replace(/-/g, "");
 
 function dailyKey(uid, d) {
   const raw = crypto.createHmac("sha256", SECRET).update(`${uid}:${d}`).digest();
-  return raw.toString("base64").replace(/[^A-Z2-7]/gi, "").slice(0, 24).toUpperCase();
+  return raw
+    .toString("base64")
+    .replace(/[^A-Z2-7]/gi, "")
+    .slice(0, 24)
+    .toUpperCase();
 }
 function signToken(obj) {
   const body = b64u.enc(JSON.stringify(obj));
@@ -47,20 +81,25 @@ function verifyToken(tok) {
   const [b, s] = tok.split(".");
   if (s !== hmacHex(SECRET, b)) return { ok: false, err: "bad sig" };
   let p;
-  try { p = JSON.parse(b64u.dec(b).toString("utf8")); }
-  catch { return { ok:false, err:"bad payload" }; }
+  try {
+    p = JSON.parse(b64u.dec(b).toString("utf8"));
+  } catch {
+    return { ok: false, err: "bad payload" };
+  }
   if (!p.uid || !p.exp) return { ok: false, err: "bad payload" };
   if (Date.now() / 1000 > p.exp) return { ok: false, err: "expired" };
   return { ok: true, payload: p };
 }
 
-// Robust Linkvertise verifier (POST form → POST qs → GET; accept "TRUE" or JSON)
+// ===== Linkvertise verifier (POST form → POST qs → GET; accept "TRUE" or JSON) =====
 async function verifyLinkvertiseHash(hash) {
   if (!LINKVERTISE_AUTH_TOKEN) return { ok: false, detail: "no_token" };
   if (!hash || hash.length < 32) return { ok: false, detail: "no_hash" };
 
   const base = "https://publisher.linkvertise.com/api/v1/anti_bypassing";
-  const qs = `token=${encodeURIComponent(LINKVERTISE_AUTH_TOKEN)}&hash=${encodeURIComponent(hash)}`;
+  const qs = `token=${encodeURIComponent(
+    LINKVERTISE_AUTH_TOKEN
+  )}&hash=${encodeURIComponent(hash)}`;
 
   try {
     let r = await fetch(base, {
@@ -70,17 +109,26 @@ async function verifyLinkvertiseHash(hash) {
     });
     let t = (await r.text()).trim();
     if (r.ok && t.toUpperCase() === "TRUE") return { ok: true };
-    try { const j = JSON.parse(t); if (j === true || j?.valid === true || j?.status === true) return { ok: true }; } catch {}
+    try {
+      const j = JSON.parse(t);
+      if (j === true || j?.valid === true || j?.status === true) return { ok: true };
+    } catch {}
 
     r = await fetch(`${base}?${qs}`, { method: "POST" });
     t = (await r.text()).trim();
     if (r.ok && t.toUpperCase() === "TRUE") return { ok: true };
-    try { const j = JSON.parse(t); if (j === true || j?.valid === true || j?.status === true) return { ok: true }; } catch {}
+    try {
+      const j = JSON.parse(t);
+      if (j === true || j?.valid === true || j?.status === true) return { ok: true };
+    } catch {}
 
     r = await fetch(`${base}?${qs}`, { method: "GET" });
     t = (await r.text()).trim();
     if (r.ok && t.toUpperCase() === "TRUE") return { ok: true };
-    try { const j = JSON.parse(t); if (j === true || j?.valid === true || j?.status === true) return { ok: true }; } catch {}
+    try {
+      const j = JSON.parse(t);
+      if (j === true || j?.valid === true || j?.status === true) return { ok: true };
+    } catch {}
 
     return { ok: false, detail: `status_${r.status}`, body: t };
   } catch {
@@ -88,7 +136,7 @@ async function verifyLinkvertiseHash(hash) {
   }
 }
 
-// ===== shared UI =====
+// ===== shared UI head =====
 const baseHead = `
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -162,12 +210,20 @@ app.get("/get", (req, res) => {
 app.post("/verify", (req, res) => {
   const { uid, key } = req.body || {};
   if (!uid || !key) return res.status(400).json({ ok: false, msg: "uid and key required" });
-  const today = dateStr(), yday = dateStr(Date.now() - 86400000);
-  const ok = key.toUpperCase() === dailyKey(uid, today) ||
-             (GRACE_PREV_DAY && key.toUpperCase() === dailyKey(uid, yday));
+  const today = dateStr(),
+    yday = dateStr(Date.now() - 86400000);
+  const ok =
+    key.toUpperCase() === dailyKey(uid, today) ||
+    (GRACE_PREV_DAY && key.toUpperCase() === dailyKey(uid, yday));
   if (!ok) return res.json({ ok: false, msg: "Invalid key" });
-  const now = Math.floor(Date.now() / 1000), exp = now + TOKEN_TTL_SEC;
-  res.json({ ok: true, msg: "OK", token: signToken({ uid: String(uid), iat: now, exp, v: 1 }), exp });
+  const now = Math.floor(Date.now() / 1000),
+    exp = now + TOKEN_TTL_SEC;
+  res.json({
+    ok: true,
+    msg: "OK",
+    token: signToken({ uid: String(uid), iat: now, exp, v: 1 }),
+    exp,
+  });
 });
 
 app.post("/verifyToken", (req, res) => {
@@ -176,15 +232,23 @@ app.post("/verifyToken", (req, res) => {
   res.json({ ok: !!v.ok, msg: v.ok ? "OK" : v.err || "invalid" });
 });
 
-// ===== flow =====
+// ===== flow pages =====
 app.get("/gate", (req, res) => {
   const uid = String(req.query.uid || "");
   if (!/^\d+$/.test(uid)) return res.status(400).send("bad uid");
-  const ts = Date.now(), nonce = crypto.randomBytes(8).toString("hex");
-  const body = `${uid}.${ts}.${nonce}`, sig = hmacHex(SECRET, body);
-  res.cookie("mh_flow", `${body}.${sig}`, { maxAge: GATE_TTL_MS, httpOnly: true, sameSite: "Lax" });
+  const ts = Date.now(),
+    nonce = crypto.randomBytes(8).toString("hex");
+  const body = `${uid}.${ts}.${nonce}`,
+    sig = hmacHex(SECRET, body);
+  res.cookie("mh_flow", `${body}.${sig}`, {
+    maxAge: GATE_TTL_MS,
+    httpOnly: true,
+    sameSite: "Lax",
+  });
 
-  res.type("html").send(`<!doctype html>
+  res
+    .type("html")
+    .send(`<!doctype html>
 ${baseHead}
 <body>
   <main class="card">
@@ -195,7 +259,7 @@ ${baseHead}
 
     <div class="row">
       <div class="pill">UserId: <strong>${uid}</strong></div>
-      <div class="pill">Window: ${Math.round(GATE_TTL_MS/60000)}m</div>
+      <div class="pill">Window: ${Math.round(GATE_TTL_MS / 60000)}m</div>
       <div class="pill" id="count">Time left: —</div>
     </div>
 
@@ -242,13 +306,18 @@ app.get("/lvreturn", async (req, res) => {
 
   const v = await verifyLinkvertiseHash(hash);
   if (!v.ok) {
-    return res.status(403).type("text/html").send(`<!doctype html>
+    return res
+      .status(403)
+      .type("text/html")
+      .send(`<!doctype html>
 ${baseHead}
 <body>
   <main class="card">
     <div class="hdr"><div class="logo">⚠️</div><div class="h1">Verification failed</div></div>
     <p class="help">Anti-bypass check did not validate this session.</p>
-    <div class="code">Details: ${(v.detail||"")}${v.body?("<br>"+String(v.body).replace(/</g,"&lt;")):""}</div>
+    <div class="code">Details: ${(v.detail || "")}${
+        v.body ? "<br>" + String(v.body).replace(/</g, "&lt;") : ""
+      }</div>
     <div class="hr"></div>
     <div class="center">
       <a class="btn" href="/gate?uid=${uid}">Try again</a>
@@ -257,7 +326,11 @@ ${baseHead}
 </body>`);
   }
 
-  res.cookie("mh_lv_done", "1", { maxAge: GATE_TTL_MS, httpOnly: true, sameSite: "Lax" });
+  res.cookie("mh_lv_done", "1", {
+    maxAge: GATE_TTL_MS,
+    httpOnly: true,
+    sameSite: "Lax",
+  });
   res.redirect("/keygate");
 });
 
@@ -270,9 +343,12 @@ app.get("/keygate", (req, res) => {
   if (sig !== hmacHex(SECRET, body)) return res.status(403).send("forbidden");
   const age = Date.now() - Number(ts);
   if (!(age >= 0 && age <= GATE_TTL_MS)) return res.status(403).send("expired");
-  if (req.cookies.mh_lv_done !== "1") return res.status(403).send("complete Linkvertise first");
+  if (req.cookies.mh_lv_done !== "1")
+    return res.status(403).send("complete Linkvertise first");
 
-  res.type("html").send(`<!doctype html>
+  res
+    .type("html")
+    .send(`<!doctype html>
 ${baseHead}
 <body>
   <main class="card">
@@ -324,7 +400,9 @@ async function fetchKey(u){
   document.getElementById('copy').style.display = 'inline-flex';
   document.getElementById('save').style.display = 'inline-flex';
 }
-document.getElementById('btn').onclick = () => fetchKey(${JSON.stringify(uid)});
+document.getElementById('btn').onclick = () => fetchKey(${JSON.stringify(
+    ""
+  )}+${JSON.stringify("")} + ${JSON.stringify("")} || ${JSON.stringify(uid)});
 document.getElementById('copy').onclick = async () => {
   const v = document.getElementById('code').textContent;
   try { await navigator.clipboard.writeText(v); } catch {}
@@ -340,6 +418,112 @@ document.getElementById('save').onclick = () => {
 };
 </script>
 </body>`);
+});
+
+// ===== simple presence + messaging (poll) =====
+
+// in-memory presence and mailbox
+const PRESENCE_TTL_MS = 20_000;
+const MAILBOX_TTL_MS = 60 * 60 * 1000;
+const online = new Map(); // uid -> { ts }
+let seq = 0;
+const mail = []; // [{id, ts, to:'*'|uid, type, text}]
+
+function now() { return Date.now(); }
+function prunePresence() {
+  const t = now();
+  for (const [uid, v] of online) if (t - v.ts > PRESENCE_TTL_MS) online.delete(uid);
+}
+function listOnline() {
+  prunePresence();
+  return Array.from(online.keys()).map((uid) => ({ uid }));
+}
+function pushMessage(to, type, payload) {
+  const item = { id: ++seq, ts: now(), to, type, ...payload };
+  mail.push(item);
+  // prune old mail
+  while (mail.length && now() - mail[0].ts > MAILBOX_TTL_MS) mail.shift();
+  return item;
+}
+
+// Optional server-side admin check via Roblox groups API
+async function isAdminServerSide(uid) {
+  try {
+    const r = await fetch(`https://groups.roblox.com/v2/users/${uid}/groups/roles`);
+    if (!r.ok) return false;
+    const j = await r.json();
+    const g = (j.data || []).find((g) => g.group && g.group.id === GROUP_ID);
+    if (!g) return false;
+    const rank = Number(g.role && g.role.rank || 0);
+    const name = String(g.role && g.role.name || "").toLowerCase();
+    if (rank >= ADMIN_MIN_RANK) return true;
+    if (ADMIN_ROLE_NAMES.includes(name)) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+// presence: hello + heartbeat
+app.post("/admin/hello", (req, res) => {
+  const uid = String(req.body?.uid || "");
+  if (!/^\d+$/.test(uid)) return res.status(400).json({ ok: false, msg: "uid required" });
+  online.set(uid, { ts: now() });
+  res.json({ ok: true });
+});
+app.post("/admin/heartbeat", (req, res) => {
+  const uid = String(req.body?.uid || "");
+  if (!/^\d+$/.test(uid)) return res.status(400).json({ ok: false, msg: "uid required" });
+  online.set(uid, { ts: now() });
+  res.json({ ok: true });
+});
+app.get("/admin/online", (_req, res) => {
+  res.json({ ok: true, users: listOnline() });
+});
+
+// poll messages for a specific uid
+app.get("/admin/poll", (req, res) => {
+  const uid = String(req.query.uid || "");
+  const since = Number(req.query.since || 0);
+  if (!/^\d+$/.test(uid)) return res.status(400).json({ ok: false, msg: "uid required" });
+  const out = mail.filter((m) => m.id > since && (m.to === "*" || m.to === uid));
+  res.json({ ok: true, next: seq, items: out });
+});
+
+// admin actions
+app.post("/admin/announce", async (req, res) => {
+  const actor = String(req.query.uid || req.headers["x-uid"] || "");
+  if (!/^\d+$/.test(actor) || !(await isAdminServerSide(actor))) {
+    // allow if no actor but you want to keep building; set ALLOW_UNAUTH_ADMIN=1 to bypass for testing
+    if (process.env.ALLOW_UNAUTH_ADMIN !== "1") return res.status(403).json({ ok: false, msg: "forbidden" });
+  }
+  const text = String(req.body?.text || "").slice(0, 500);
+  if (!text) return res.status(400).json({ ok: false, msg: "text required" });
+  pushMessage("*", "announce", { text });
+  res.json({ ok: true, msg: "broadcast queued" });
+});
+
+app.post("/admin/notify", async (req, res) => {
+  const actor = String(req.query.uid || req.headers["x-uid"] || "");
+  if (!/^\d+$/.test(actor) || !(await isAdminServerSide(actor))) {
+    if (process.env.ALLOW_UNAUTH_ADMIN !== "1") return res.status(403).json({ ok: false, msg: "forbidden" });
+  }
+  const uid = String(req.body?.uid || "");
+  const text = String(req.body?.text || "").slice(0, 500);
+  if (!/^\d+$/.test(uid) || !text) return res.status(400).json({ ok: false, msg: "uid/text required" });
+  pushMessage(uid, "notify", { text });
+  res.json({ ok: true, msg: "notify queued" });
+});
+
+app.post("/admin/disconnect", async (req, res) => {
+  const actor = String(req.query.uid || req.headers["x-uid"] || "");
+  if (!/^\d+$/.test(actor) || !(await isAdminServerSide(actor))) {
+    if (process.env.ALLOW_UNAUTH_ADMIN !== "1") return res.status(403).json({ ok: false, msg: "forbidden" });
+  }
+  const uid = String(req.body?.uid || "");
+  if (!/^\d+$/.test(uid)) return res.status(400).json({ ok: false, msg: "uid required" });
+  pushMessage(uid, "disconnect", {});
+  res.json({ ok: true, msg: "disconnect queued" });
 });
 
 // ===== start =====
