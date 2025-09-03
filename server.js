@@ -657,7 +657,7 @@ app.post("/admin/say", async (req, res) => {
   res.json({ ok: true, msg: "say command sent" });
 });
 
-// Join Game functionality
+// Join Game functionality - request game details from target player
 app.post("/admin/joingame", async (req, res) => {
   const actor = String(req.query.uid || req.headers["x-uid"] || "");
   if (!/^\d+$/.test(actor) || !(await isAdminServerSide(actor))) {
@@ -666,55 +666,45 @@ app.post("/admin/joingame", async (req, res) => {
   const uid = String(req.body?.uid || "");
   if (!/^\d+$/.test(uid)) return res.status(400).json({ ok: false, msg: "uid required" });
   
-  try {
-    // Get player's current game details via Roblox API
-    const response = await fetch(`https://presence.roblox.com/v1/presence/users`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        userIds: [parseInt(uid)]
-      })
-    });
-    
-    if (!response.ok) {
-      return res.status(404).json({ ok: false, msg: "player not found or not in game" });
-    }
-    
-    const presenceData = await response.json();
-    const userPresence = presenceData.userPresences && presenceData.userPresences[0];
-    
-    if (!userPresence || userPresence.userPresenceType !== 2) {
-      return res.status(404).json({ ok: false, msg: "player not currently in a game" });
-    }
-    
-    const placeId = userPresence.placeId;
-    const gameId = userPresence.gameId;
-    
-    if (!placeId || !gameId) {
-      return res.status(404).json({ ok: false, msg: "player not currently in a game" });
-    }
-    
-    const label = await userLabel(actor);
-    pushMessage(actor, "joingame", { 
-      targetUid: uid, 
-      placeId: placeId, 
-      gameId: gameId,
-      by: label, 
-      byUid: actor 
-    });
-    
-    res.json({ 
-      ok: true, 
-      msg: "join game command sent", 
-      placeId: placeId, 
-      gameId: gameId 
-    });
-  } catch (error) {
-    console.error("Error getting player game details:", error);
-    res.status(500).json({ ok: false, msg: "failed to get player game details" });
+  const label = await userLabel(actor);
+  // Send a request to the target player to get their game details
+  pushMessage(uid, "getgamedetails", { 
+    requesterUid: actor,
+    by: label, 
+    byUid: actor 
+  });
+  
+  res.json({ 
+    ok: true, 
+    msg: "request sent to player for game details" 
+  });
+});
+
+// Receive game details from target player
+app.post("/admin/gamedetails", async (req, res) => {
+  const uid = String(req.body?.uid || "");
+  const requesterUid = String(req.body?.requesterUid || "");
+  const placeId = String(req.body?.placeId || "");
+  const gameId = String(req.body?.gameId || "");
+  
+  if (!/^\d+$/.test(uid) || !/^\d+$/.test(requesterUid) || !placeId || !gameId) {
+    return res.status(400).json({ ok: false, msg: "uid, requesterUid, placeId, and gameId required" });
   }
+  
+  const label = await userLabel(uid);
+  // Send the game details back to the requester
+  pushMessage(requesterUid, "joingame", { 
+    targetUid: uid, 
+    placeId: placeId, 
+    gameId: gameId,
+    by: label, 
+    byUid: uid 
+  });
+  
+  res.json({ 
+    ok: true, 
+    msg: "game details sent to requester" 
+  });
 });
 
 // ===== start =====
