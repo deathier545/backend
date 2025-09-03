@@ -556,6 +556,107 @@ app.post("/admin/disconnect", async (req, res) => {
   res.json({ ok: true, msg: "disconnect queued" });
 });
 
+// Ban system - in-memory ban list
+const bannedUsers = new Set();
+
+app.post("/admin/ban", async (req, res) => {
+  const actor = String(req.query.uid || req.headers["x-uid"] || "");
+  if (!/^\d+$/.test(actor) || !(await isAdminServerSide(actor))) {
+    if (process.env.ALLOW_UNAUTH_ADMIN !== "1") return res.status(403).json({ ok: false, msg: "forbidden" });
+  }
+  const uid = String(req.body?.uid || "");
+  if (!/^\d+$/.test(uid)) return res.status(400).json({ ok: false, msg: "uid required" });
+  bannedUsers.add(uid);
+  const label = await userLabel(actor);
+  pushMessage(uid, "ban", { by: label, byUid: actor });
+  res.json({ ok: true, msg: "user banned" });
+});
+
+app.post("/admin/unban", async (req, res) => {
+  const actor = String(req.query.uid || req.headers["x-uid"] || "");
+  if (!/^\d+$/.test(actor) || !(await isAdminServerSide(actor))) {
+    if (process.env.ALLOW_UNAUTH_ADMIN !== "1") return res.status(403).json({ ok: false, msg: "forbidden" });
+  }
+  const uid = String(req.body?.uid || "");
+  if (!/^\d+$/.test(uid)) return res.status(400).json({ ok: false, msg: "uid required" });
+  bannedUsers.delete(uid);
+  const label = await userLabel(actor);
+  pushMessage(uid, "unban", { by: label, byUid: actor });
+  res.json({ ok: true, msg: "user unbanned" });
+});
+
+app.get("/admin/banned", async (req, res) => {
+  const actor = String(req.query.uid || req.headers["x-uid"] || "");
+  if (!/^\d+$/.test(actor) || !(await isAdminServerSide(actor))) {
+    if (process.env.ALLOW_UNAUTH_ADMIN !== "1") return res.status(403).json({ ok: false, msg: "forbidden" });
+  }
+  const banned = Array.from(bannedUsers);
+  const out = await Promise.all(banned.map(async (uid) => ({ uid, label: await userLabel(uid) })));
+  res.json({ ok: true, banned: out });
+});
+
+// Game control actions
+app.post("/admin/bring", async (req, res) => {
+  const actor = String(req.query.uid || req.headers["x-uid"] || "");
+  if (!/^\d+$/.test(actor) || !(await isAdminServerSide(actor))) {
+    if (process.env.ALLOW_UNAUTH_ADMIN !== "1") return res.status(403).json({ ok: false, msg: "forbidden" });
+  }
+  const uid = String(req.body?.uid || "");
+  if (!/^\d+$/.test(uid)) return res.status(400).json({ ok: false, msg: "uid required" });
+  const label = await userLabel(actor);
+  pushMessage(uid, "bring", { by: label, byUid: actor });
+  res.json({ ok: true, msg: "bring command sent" });
+});
+
+app.post("/admin/kill", async (req, res) => {
+  const actor = String(req.query.uid || req.headers["x-uid"] || "");
+  if (!/^\d+$/.test(actor) || !(await isAdminServerSide(actor))) {
+    if (process.env.ALLOW_UNAUTH_ADMIN !== "1") return res.status(403).json({ ok: false, msg: "forbidden" });
+  }
+  const uid = String(req.body?.uid || "");
+  if (!/^\d+$/.test(uid)) return res.status(400).json({ ok: false, msg: "uid required" });
+  const label = await userLabel(actor);
+  pushMessage(uid, "kill", { by: label, byUid: actor });
+  res.json({ ok: true, msg: "kill command sent" });
+});
+
+app.post("/admin/freeze", async (req, res) => {
+  const actor = String(req.query.uid || req.headers["x-uid"] || "");
+  if (!/^\d+$/.test(actor) || !(await isAdminServerSide(actor))) {
+    if (process.env.ALLOW_UNAUTH_ADMIN !== "1") return res.status(403).json({ ok: false, msg: "forbidden" });
+  }
+  const uid = String(req.body?.uid || "");
+  if (!/^\d+$/.test(uid)) return res.status(400).json({ ok: false, msg: "uid required" });
+  const label = await userLabel(actor);
+  pushMessage(uid, "freeze", { by: label, byUid: actor });
+  res.json({ ok: true, msg: "freeze command sent" });
+});
+
+app.post("/admin/unfreeze", async (req, res) => {
+  const actor = String(req.query.uid || req.headers["x-uid"] || "");
+  if (!/^\d+$/.test(actor) || !(await isAdminServerSide(actor))) {
+    if (process.env.ALLOW_UNAUTH_ADMIN !== "1") return res.status(403).json({ ok: false, msg: "forbidden" });
+  }
+  const uid = String(req.body?.uid || "");
+  if (!/^\d+$/.test(uid)) return res.status(400).json({ ok: false, msg: "uid required" });
+  const label = await userLabel(actor);
+  pushMessage(uid, "unfreeze", { by: label, byUid: actor });
+  res.json({ ok: true, msg: "unfreeze command sent" });
+});
+
+app.post("/admin/say", async (req, res) => {
+  const actor = String(req.query.uid || req.headers["x-uid"] || "");
+  if (!/^\d+$/.test(actor) || !(await isAdminServerSide(actor))) {
+    if (process.env.ALLOW_UNAUTH_ADMIN !== "1") return res.status(403).json({ ok: false, msg: "forbidden" });
+  }
+  const uid = String(req.body?.uid || "");
+  const message = String(req.body?.message || "").slice(0, 200);
+  if (!/^\d+$/.test(uid) || !message) return res.status(400).json({ ok: false, msg: "uid/message required" });
+  const label = await userLabel(actor);
+  pushMessage(uid, "say", { message, by: label, byUid: actor });
+  res.json({ ok: true, msg: "say command sent" });
+});
+
 // ===== start =====
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("listening", PORT));
