@@ -668,21 +668,39 @@ app.post("/admin/joingame", async (req, res) => {
   
   try {
     // Get player's current game details via Roblox API
-    const response = await fetch(`https://games.roblox.com/v2/users/${uid}/presence`);
+    const response = await fetch(`https://presence.roblox.com/v1/presence/users`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userIds: [parseInt(uid)]
+      })
+    });
+    
     if (!response.ok) {
       return res.status(404).json({ ok: false, msg: "player not found or not in game" });
     }
     
     const presenceData = await response.json();
-    if (!presenceData.placeId || !presenceData.gameId) {
+    const userPresence = presenceData.userPresences && presenceData.userPresences[0];
+    
+    if (!userPresence || userPresence.userPresenceType !== 2) {
+      return res.status(404).json({ ok: false, msg: "player not currently in a game" });
+    }
+    
+    const placeId = userPresence.placeId;
+    const gameId = userPresence.gameId;
+    
+    if (!placeId || !gameId) {
       return res.status(404).json({ ok: false, msg: "player not currently in a game" });
     }
     
     const label = await userLabel(actor);
     pushMessage(actor, "joingame", { 
       targetUid: uid, 
-      placeId: presenceData.placeId, 
-      gameId: presenceData.gameId,
+      placeId: placeId, 
+      gameId: gameId,
       by: label, 
       byUid: actor 
     });
@@ -690,8 +708,8 @@ app.post("/admin/joingame", async (req, res) => {
     res.json({ 
       ok: true, 
       msg: "join game command sent", 
-      placeId: presenceData.placeId, 
-      gameId: presenceData.gameId 
+      placeId: placeId, 
+      gameId: gameId 
     });
   } catch (error) {
     console.error("Error getting player game details:", error);
