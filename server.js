@@ -2,6 +2,7 @@
 // - Key system + Linkvertise anti-bypass
 // - Admin presence + fast announce/notify/disconnect (poll-based)
 // - Minimal CORS for Roblox HttpService/executors
+// - Names: /admin/online returns {uid,label}; admin actions include {by,byUid}
 
 import express from "express";
 import crypto from "crypto";
@@ -427,7 +428,7 @@ const PRESENCE_TTL_MS = 20_000;
 const MAILBOX_TTL_MS = 60 * 60 * 1000;
 const online = new Map(); // uid -> { ts }
 let seq = 0;
-const mail = []; // [{id, ts, to:'*'|uid, type, text}]
+const mail = []; // [{id, ts, to:'*'|uid, type, text, by, byUid}]
 
 function now() { return Date.now(); }
 function prunePresence() {
@@ -439,11 +440,33 @@ function listOnline() {
   return Array.from(online.keys()).map((uid) => ({ uid }));
 }
 function pushMessage(to, type, payload) {
-  const item = { id: ++seq, ts: now(), to, type, ...payload };
+  const item = { id: ++seq, ts: now(), to, type, ...(payload||{}) };
   mail.push(item);
   // prune old mail
   while (mail.length && now() - mail[0].ts > MAILBOX_TTL_MS) mail.shift();
   return item;
+}
+
+// ===== name labels for users =====
+const NameCache = new Map(); // uid -> {label, ts}
+async function userLabel(uid) {
+  uid = String(uid);
+  const cached = NameCache.get(uid);
+  if (cached && now() - cached.ts < 6*60*60*1000) return cached.label;
+  try {
+    const r = await fetch(`https://users.roblox.com/v1/users/${uid}`);
+    if (r.ok) {
+      const j = await r.json();
+      const dn = String(j.displayName || "");
+      const un = String(j.name || "");
+      const label = dn && un ? `${dn} (@${un})` : (dn || (un ? `@${un}` : uid));
+      NameCache.set(uid, { label, ts: now() });
+      return label;
+    }
+  } catch {}
+  const label = uid;
+  NameCache.set(uid, { label, ts: now() });
+  return label;
 }
 
 // Optional server-side admin check via Roblox groups API
@@ -454,8 +477,8 @@ async function isAdminServerSide(uid) {
     const j = await r.json();
     const g = (j.data || []).find((g) => g.group && g.group.id === GROUP_ID);
     if (!g) return false;
-    const rank = Number(g.role && g.role.rank || 0);
-    const name = String(g.role && g.role.name || "").toLowerCase();
+    const rank = Number((g.role && g.role.rank) || 0);
+    const name = String((g.role && g.role.name) || "").toLowerCase();
     if (rank >= ADMIN_MIN_RANK) return true;
     if (ADMIN_ROLE_NAMES.includes(name)) return true;
     return false;
@@ -477,8 +500,12 @@ app.post("/admin/heartbeat", (req, res) => {
   online.set(uid, { ts: now() });
   res.json({ ok: true });
 });
-app.get("/admin/online", (_req, res) => {
-  res.json({ ok: true, users: listOnline() });
+
+// online list with labels
+app.get("/admin/online", async (_req, res) => {
+  const users = listOnline();
+  const out = await Promise.all(users.map(async (u) => ({ uid: u.uid, label: await userLabel(u.uid) })));
+  res.json({ ok: true, users: out });
 });
 
 // poll messages for a specific uid
@@ -490,7 +517,7 @@ app.get("/admin/poll", (req, res) => {
   res.json({ ok: true, next: seq, items: out });
 });
 
-// admin actions
+// admin actions — include actor identity in payloads
 app.post("/admin/announce", async (req, res) => {
   const actor = String(req.query.uid || req.headers["x-uid"] || "");
   if (!/^\d+$/.test(actor) || !(await isAdminServerSide(actor))) {
@@ -499,7 +526,8 @@ app.post("/admin/announce", async (req, res) => {
   }
   const text = String(req.body?.text || "").slice(0, 500);
   if (!text) return res.status(400).json({ ok: false, msg: "text required" });
-  pushMessage("*", "announce", { text });
+  const label = await userLabel(actor);
+  pushMessage("*", "announce", { text, by: label, byUid: actor });
   res.json({ ok: true, msg: "broadcast queued" });
 });
 
@@ -511,7 +539,8 @@ app.post("/admin/notify", async (req, res) => {
   const uid = String(req.body?.uid || "");
   const text = String(req.body?.text || "").slice(0, 500);
   if (!/^\d+$/.test(uid) || !text) return res.status(400).json({ ok: false, msg: "uid/text required" });
-  pushMessage(uid, "notify", { text });
+  const label = await userLabel(actor);
+  pushMessage(uid, "notify", { text, by: label, byUid: actor });
   res.json({ ok: true, msg: "notify queued" });
 });
 
@@ -522,7 +551,8 @@ app.post("/admin/disconnect", async (req, res) => {
   }
   const uid = String(req.body?.uid || "");
   if (!/^\d+$/.test(uid)) return res.status(400).json({ ok: false, msg: "uid required" });
-  pushMessage(uid, "disconnect", {});
+  const label = await userLabel(actor);
+  pushMessage(uid, "disconnect", { by: label, byUid: actor });
   res.json({ ok: true, msg: "disconnect queued" });
 });
 
